@@ -1,0 +1,18 @@
+# The same 4x1 ring as p150_4x1_ring.textproto, with every mesh row pinned to a physical card.  This is the descriptor
+# the published numbers were measured with.  chip_id = mesh row; tray_id = the card's PCI bus number in decimal
+# (0xc1 = 193, 0x01 = 1, 0xe1 = 225, 0x21 = 33), so the pinning only applies to a host whose four p150b cards sit on
+# PCI buses 01, 21, c1 and e1 and are cabled 01 - c1 - 21 - e1 - 01.  Rows [c1, 01, e1, 21] are the ring reflection
+# of the fabric's default assignment [01, c1, 21, e1]; every ring neighbour pair is a real cable.  On another host
+# adapt the tray ids to your bus numbers and cabling, or use p150_4x1_ring.textproto.
+mesh_descriptors {
+  name: "M0"
+  arch: BLACKHOLE
+  device_topology { dims: [ 4, 1 ] dim_types: [ RING, LINE ] }
+  host_topology   { dims: [ 1, 1 ] }
+  channels { count: 2 policy: RELAXED }
+}
+top_level_instance { mesh { mesh_descriptor: "M0" mesh_id: 0 } }
+pinnings { logical_fabric_node_id { mesh_id: 0 chip_id: 0 } physical_asic_position { tray_id: 193 asic_location: 0 } }
+pinnings { logical_fabric_node_id { mesh_id: 0 chip_id: 1 } physical_asic_position { tray_id: 1 asic_location: 0 } }
+pinnings { logical_fabric_node_id { mesh_id: 0 chip_id: 2 } physical_asic_position { tray_id: 225 asic_location: 0 } }
+pinnings { logical_fabric_node_id { mesh_id: 0 chip_id: 3 } physical_asic_position { tray_id: 33 asic_location: 0 } }

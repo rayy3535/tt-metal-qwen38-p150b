@@ -1,0 +1,10 @@
+# 4 x Blackhole p150b as one 4x1 mesh whose first axis is a RING (the cards are cabled 1-2-3-4-1, two QSFP-DD links
+# per hop).  The fabric picks which physical card becomes which mesh row.
+mesh_descriptors {
+  name: "M0"
+  arch: BLACKHOLE
+  device_topology { dims: [ 4, 1 ] dim_types: [ RING, LINE ] }
+  host_topology   { dims: [ 1, 1 ] }
+  channels { count: 2 policy: RELAXED }
+}
+top_level_instance { mesh { mesh_descriptor: "M0" mesh_id: 0 } }

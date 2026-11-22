@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 Tenstorrent AI ULC
+// SPDX-License-Identifier: Apache-2.0
+//
+// TwoSum SFPU probe reader: input tiles 0 .. n - 1 into cb 0, one at a time.  Runtime args: 0 address, 1 n.
+#include "api/dataflow/dataflow_api.h"
+#include "api/dataflow/noc.h"
+#include "api/dataflow/circular_buffer.h"
+#include "api/tensor/noc_traits.h"
+
+void kernel_main() {
+    const uint32_t addr = get_arg_val<uint32_t>(0);
+    const uint32_t n = get_arg_val<uint32_t>(1);
+    constexpr auto args = TensorAccessorArgs<0>();
+    const auto X = TensorAccessor(args, addr);
+    const Noc noc;
+    CircularBuffer cb(0);
+    const uint32_t pb = X.get_aligned_page_size();
+    for (uint32_t t = 0; t < n; ++t) {
+        cb.reserve_back(1);
+        noc.async_read(X, cb, pb, {.page_id = t}, {.offset_bytes = 0});
+        noc.async_read_barrier();
+        cb.push_back(1);
+    }
+}

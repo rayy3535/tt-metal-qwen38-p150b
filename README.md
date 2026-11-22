@@ -1,239 +1,506 @@
-[![tt-metal CI](https://github.com/tenstorrent/tt-metal/actions/workflows/sanity-tests.yaml/badge.svg)](https://github.com/tenstorrent/tt-metal/actions/workflows/sanity-tests.yaml)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/tenstorrent/tt-metal)
-
-<div align="center">
-
-<h1>
-
-[Hardware](https://tenstorrent.com/hardware/blackhole) | [Install](./INSTALLING.md) |  [Discord](https://discord.gg/tvhGzHQwaj) | [Join Us](https://boards.greenhouse.io/tenstorrent/jobs/4155609007) | [Bounty $](https://github.com/tenstorrent/tt-metal/issues?q=is%3Aissue%20state%3Aopen%20label%3Abounty)
-
-</h1>
-
-<img src="https://raw.githubusercontent.com/tenstorrent/tt-metal/main/docs/source/common/_static/tt_nn_w_logo.png" alt="ttnn logo" height="180"/>
-
-**TT-NN** is a Python & C++ Neural Network OP library.
-
-<h3>
-
-[API Reference](https://docs.tenstorrent.com/tt-metal/latest/ttnn/index.html) | [Model Demos](./models/demos/)
-
-</h3>
-
-</div>
-
-## Featured Models
-
-The Models team is focused on developing the following models, optimizing them for performance, accuracy, and compatibility. Follow each model link for more details.
-
->[!IMPORTANT]
-> For a **full model list** see the **[Model Matrix](https://github.com/tenstorrent/tt-metal/blob/main/models/README.md)**, or visit the **[Developer Hub](https://tenstorrent.com/developers)**.
-
->[!NOTE]
-> Performance Metrics:
-> - Time to First Token (TTFT) measures the time (in milliseconds) it takes to generate the first output token after input is received.
-> - T/S/U (Tokens per Second per User): Represents the throughput of first-token generation after prefill. It is calculated as 1 / inter-token latency.
-> - T/S (Tokens per Second): Represents total token throughput, calculated as T/S = T/S/U x batch size.
-> - TP (Tensor Parallel) and DP (Data Parallel): Indicate the parallelization factors across multiple devices.
-> - Reported LLM Performance: Based on an input sequence length of 128 tokens for all models.
-> - Performance Data Source: Metrics were collected using the tt-metal model demos (linked above). Results may vary when using other runtimes such as the vLLM inference server.
-
-### [Llama 3.3 70B (TP=32)](./models/demos/llama3_70b_galaxy)
-| Batch | Hardware | TTFT (MS) | T/S/U | Target<br>T/S/U | T/S | TT-Metalium Release | vLLM Tenstorrent Repo Release |
-|-------|----------|-----------|-------|-----------------|-----|---------------------|-------------------------------|
-| 32    | [Galaxy (Wormhole)](https://tenstorrent.com/hardware/galaxy) | 53      | 72.5  | 80              | 2268.8  | [v0.65.0-rc7](https://github.com/tenstorrent/tt-metal/tree/v0.65.0-rc7) | [59be953](https://github.com/tenstorrent/vllm/tree/59be953f2bbd21e227f9ef4b779f545f9c3bf599/tt_metal) |
-
-### [Qwen 2.5 7B (TP=2)](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers)
-| Batch | Hardware | TTFT (MS) | T/S/U | Target<br>T/S/U | T/S  | TT-Metalium Release | vLLM Tenstorrent Repo Release |
-|-------|----------|-----------|-------|-----------------|------|---------------------|-------------------------------|
-| 32 | [n300 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 109 | 22.1 | 30 | 707.2 | [v0.62.0-rc35](https://github.com/tenstorrent/tt-metal/tree/v0.62.0-rc35) | [ced0161](https://github.com/tenstorrent/vllm/tree/ced0161dc223e6d8aca5f44a6c43d13070c3fba6/tt_metal) |
-
-### [Qwen 2.5 72B (TP=8)](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers)
-| Batch | Hardware | TTFT (MS) | T/S/U | Target<br>T/S/U | T/S | TT-Metalium Release | vLLM Tenstorrent Repo Release |
-|-------|----------|-----------|-------|-----------------|-----|---------------------|-------------------------------|
-| 32 | [QuietBox (Wormhole)](https://tenstorrent.com/hardware/tt-quietbox) | 223 | 15.4 | 20 | 492.8 | [v0.62.0-rc25](https://github.com/tenstorrent/tt-metal/tree/v0.62.0-rc25) | [e7c329b](https://github.com/tenstorrent/vllm/tree/e7c329b1664f8591ae8b4269bed9690726e52a24/tt_metal) |
-
-### [Whisper (distil-large-v3)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/audio/whisper)
-| Batch | Hardware | TTFT (MS) | T/S/U | Target<br>T/S/U | T/S | TT-Metalium Release |
-|-------|----------|-----------|-------|-----------------|-----|---------------------|
-| 1     | [n150 (Wormhole)](https://tenstorrent.com/hardware/wormhole)        | 163       | 105.0  | 45           | 105.0   | [v0.65.0-dev20251208](https://github.com/tenstorrent/tt-metal/tree/v0.65.0-dev20251208) |
-| 1     | [p150 (Blackhole)](https://tenstorrent.com/hardware/blackhole)        | 63       | 263.4  |            | 263.4   | [v0.65.0-dev20251208](https://github.com/tenstorrent/tt-metal/tree/v0.65.0-dev20251208) |
-
-### [Mixtral 8x7B (TP=8)](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers)
-| Batch | Hardware | TTFT (MS) | T/S/U | Target<br>T/S/U | T/S | TT-Metalium Release |
-|-------|----------|-----------|-------|-----------------|-----|---------------------|
-| 32 | [QuietBox (Wormhole)](https://tenstorrent.com/hardware/tt-quietbox) | 122 | 24.9 | 33 | 796.8 | [v0.62.0-dev20251015](https://github.com/tenstorrent/tt-metal/tree/v0.62.0-dev20251015) |
-
-Blackhole software optimization is under active development.  Please join us in shaping the future of open source AI! <br> [\[Discord\]](https://discord.gg/tenstorrent) [\[Developer Hub\]](https://tenstorrent.com/developers)
-
-For more information regarding vLLM installation and environment creation visit the [Tenstorrent vLLM TT plugin README](https://github.com/tenstorrent/vllm-tt-plugin).
-Note that the previously maintained [vLLM TT fork](https://github.com/tenstorrent/vllm)
-is deprecated.
-
-## Model Updates
-
-For the latest model updates and features, please see [MODEL_UPDATES.md](models/docs/MODEL_UPDATES.md)
-
-## Model Bring-Up and Testing
-
-For information on initial model procedures, please see [Model Bring-Up and Testing](https://github.com/tenstorrent/tt-metal/blob/main/models/docs/model_bring_up.md)
-
-## TT-NN Tech Reports
-
-- [Advanced Performance Optimizations for Models](./tech_reports/AdvancedPerformanceOptimizationsForModels/AdvancedPerformanceOptimizationsForModels.md) (updated March 4th, 2025)
-- [CCL Performance Tuning Tips](./tech_reports/CCLs/CCL_Performance_Best_Practices.md) (updated Sept 24th, 2026)
-- [ViT Implementation in TT-NN on GS](./tech_reports/ViT-TTNN/vit.md)  (updated Sept 22nd, 2024)
-- [LLMs Bring up in TT-NN](./tech_reports/LLMs/llms.md)  (updated Oct 29th, 2024)
-- [CNN Bring up & Optimization in TT-NN](./tech_reports/CNNs/cnn_optimizations.md) (updated Jan 22nd, 2025)
-
-## Benchmarks
-
-- [Matrix Multiply FLOPS on Wormhole and Blackhole](./tech_reports/GEMM_FLOPS/GEMM_FLOPS.md)  (updated June 17th, 2025)
-- [CCL Bandwidth on Wormhole and Blackhole](./tech_reports/CCLs/CCL_bandwidth.md)  (updated Sept 24th, 2026)
-
----
-
-<div align="center">
-
-<img src="https://raw.githubusercontent.com/tenstorrent/tt-metal/main/docs/source/common/images/tt_refresh_metalium_w_icon.png" alt="TT-Metalium logo" height="180"/>
-
-**TT-Metalium** is our low-level programming model, enabling kernel development for Tenstorrent hardware.
-
-<h3>
-
-[Programming Guide](./METALIUM_GUIDE.md) | [API Reference](https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/apis/index.html)
-
-</h3>
-</div>
-
-## Getting started
-
-Get started with [simple kernels](https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tt_metal/examples/index.html).
-
-## TT-Metalium Tech Reports
-
-- [Matrix Engine](./tech_reports/matrix_engine/matrix_engine.md) (updated Sept 6th, 2024)
-- [Data Formats](./tech_reports/data_formats/data_formats.md) (updated Sept 7th, 2024)
-- [Reconfiguring Data Formats](./tech_reports/data_formats/reconfig_data_format.md) (updated Oct 17th, 2024)
-- [Handling special floating-point numbers](./tech_reports/Handling_Special_Value/special_values.md) (updated Oct 5th, 2024)
-- [Allocator](./tech_reports/memory/allocator.md) (Updated Dec 19th, 2024)
-- [Tensor Layouts](./tech_reports/tensor_layouts/tensor_layouts.md) (updated Sept 6th, 2024)
-- [Saturating DRAM Bandwidth](./tech_reports/Saturating_DRAM_bandwidth/Saturating_DRAM_bandwidth.md) (updated Sept 6th, 2024)
-- [Flash Attention on Wormhole](./tech_reports/FlashAttention/FlashAttention.md) (updated Sept 6th, 2024)
-- [CNNs on TT Architectures](./tech_reports/CNNs/ttcnn.md) (updated Sept 6th, 2024)
-- [Ethernet and Multichip Basics](./tech_reports/EthernetMultichip/BasicEthernetGuide.md) (Updated Sept 20th, 2024)
-- [Blackhole Bring-Up Programming Guide](./tech_reports/Blackhole/BlackholeBringUpProgrammingGuide.md) (Updated Dec 18th, 2024)
-- [Sub-Devices](./tech_reports/SubDevices/SubDevices.md) (Updated Jan 7th, 2025)
-
-## Scaleout Tech Reports
-
-- [Programming Mesh of Devices (Scale-Up)](./tech_reports/Programming_Mesh_of_Devices/Programming_Mesh_of_Devices_with_TT-NN.md) (updated Jan 6th, 2026)
-- [Programming Multiple Meshes (Scale-Out)](./tech_reports/Programming_Multiple_Meshes/Programming_Multiple_Meshes.md) (updated Jan 19th, 2026)
-- [TT-Fabric Architecture](./tech_reports/TT-Fabric/TT-Fabric-Architecture.md) (updated Dec 1st, 2025)
-- [TT-Distributed Architecture](./tech_reports/TT-Distributed/TT-Distributed-Architecture-1219.md) (updated Oct 20th, 2025)
-
-## TT-Metalium Programming Examples
-
-### Hello World
-
-- [Hello World! Compute Kernel](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/hello_world_compute_kernel/hello_world_compute.md)
-- [Hello World! Data Movement Kernel](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/hello_world_datamovement_kernel/hello_world_data_movement.md)
-
-### Add Integers
-
-- [Add 2 Integers in Baby RiscV](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/add_2_integers_in_riscv/add_2_integers_in_riscv.md)
-- [Add 2 Integers in Compute Kernel](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/add_2_integers_in_compute/add_2_integers_in_compute.md)
-
-### Simple Tensor Manipulation
-
-- [Sharding](./tech_reports/prog_examples/shard_data_rm/shard_data_rm.md)
-- [Padding](./tech_reports/prog_examples/pad_multi_core/pad_multi_core.md)
-
-### DRAM Data Movement
-
-- [Dram Loopback Data Movement](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/loopback/dram_loopback.md)
-
-### Eltwise
-
-- [Eltwise Unary OP in Vector Engine (SFPU)](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/eltwise_sfpu/eltwise_sfpu.md)
-- [Eltwise Binary OP in Matrix Engine (FPU)](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/eltwise_binary/eltwise_binary.md)
-
-### Matmul
-
-- [Matmul OP on a Single_core](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/matmul/matmul_single_core/matmul_single_core.md)
-- [Matmul OP on Multi_core (Basic)](https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/programming_examples/matmul/matmul_multi_core/matmul_multi_core.md)
-- [Matmul Multi_core Reuse (Optimized)](./tech_reports/prog_examples/matmul_multi_core_optimized/data_reuse.md)
-- [Matmul Multi_core Multi-Cast (Optimized)](./tech_reports/prog_examples/matmul_multi_core_optimized/data_mcast.md)
-
-### Tools and Instruments
-
-#### [TT-NN Visualizer](https://github.com/tenstorrent/ttnn-visualizer)
-A comprehensive tool for visualizing and analyzing model execution, offering interactive graphs, memory plots, tensor details, buffer overviews, operation flow graphs, and multi-instance support with file or SSH-based report loading.
-
-#### [TT-Exalens](https://github.com/tenstorrent/tt-exalens)
-The TT-Exalens repository describes TT-Lensium, a low-level debugging tool for Tenstorrent hardware. It allows developers to access and communicate with Wormhole and Blackhole devices.
-
-#### [TT-SMI](https://github.com/tenstorrent/tt-smi)
-The TT-SMI repository describes the Tenstorrent System Management Interface. This command line utility can interact with Tenstorrent devices on host. TT-SMI provides an easy to use interface displaying device, telemetry, and firmware information.
-
-#### [Model Explorer](https://github.com/tenstorrent/model-explorer)
-The Model Explorer is an intuitive and hierarchical visualization tool using model graphs. It organizes model operations into nested layers and provides features for model exploration and debugging.
-
-#### [Tracy Profiler](https://github.com/tenstorrent/tracy)
-The Tracy Profiler is a real-time nanosecond resolution, remote telemetry, hybrid frame, and sampling tool. Tracy supports profiling CPU, GPU, memory allocation, locks, context switches, and more.
-
-#### [Device Print Debug](https://docs.tenstorrent.com/tt-metal/latest/tt-metalium/tools/device_print.html)
-`DPRINT` can print variables, addresses, and circular buffer data from kernels to the host terminal or log file. This feature is useful for debugging issues with kernels.
-
-#### [Watcher](https://github.com/tenstorrent/tt-metal/blob/main/docs/source/tt-metalium/tools/watcher.rst)
-Watcher monitors firmware and kernels for common programming errors, and overall device status. If an error or hang occurs, Watcher displays log data of that occurrence.
-
-#### [Inspector](https://github.com/tenstorrent/tt-metal/blob/main/docs/source/tt-metalium/tools/inspector.rst)
-Inspector provides insights into host runtime. It logs necessary data for investigation and allows queries to host runtime data.
-
-## Related Tenstorrent Projects
-- [TT-Forge](https://github.com/tenstorrent/tt-forge/tree/main)
-- [TT-Forge-FE](https://github.com/tenstorrent/tt-forge-fe)
-- [TT-Torch](https://github.com/tenstorrent/tt-torch)
-- [TT-XLA](https://github.com/tenstorrent/tt-xla)
-- [TT-MLIR](https://github.com/tenstorrent/tt-mlir)
-- [TT-TVM](https://github.com/tenstorrent/tt-tvm)
-
-## Latest Releases
-
-| Release | Release Date | FW Version | KMD Version | SMI Version |
-|:---------:|:--------------:|:------------:|:--------:|:--------:|
-| 0.68.0 | ETA Apr 30, 2026 | 19.2.0 | 2.5.0 | 3.0.38 |
-| [0.67.4](https://github.com/tenstorrent/tt-metal/releases/tag/v0.67.4) | Mar 30, 2026 | 19.2.0 | 2.5.0 | 3.0.38 |
-| [0.67.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.67.0) | Mar 25, 2026 | 19.2.0 | 2.5.0 | 3.0.38 |
-| [0.66.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.66.0) | Feb 18, 2026 | 19.2.0 | 2.5.0 | 3.0.38 |
-| [0.65.1](https://github.com/tenstorrent/tt-metal/releases/tag/v0.65.1) | Jan 12, 2026 | 19.2.0 | 2.5.0 | 3.0.38 |
-| [0.65.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.65.0) | Dec 15, 2025 | 19.2.0 | 2.5.0 | 3.0.38 |
-| [0.64.5](https://github.com/tenstorrent/tt-metal/releases/tag/v0.64.5) | Dec  1, 2025 | 18.12.0 | 2.4.1 | 3.0.32 |
-| [0.64.4](https://github.com/tenstorrent/tt-metal/releases/tag/v0.64.4) | Nov 24, 2025 | 18.12.0 | 2.4.1 | 3.0.32 |
-| [0.64.3](https://github.com/tenstorrent/tt-metal/releases/tag/v0.64.3) | Nov 14, 2025 | 18.12.0 | 2.4.1 | 3.0.32 |
-| [0.64.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.64.0) | Oct 29, 2025 | 18.12.0 | 2.4.1 | 3.0.32 |
-| [0.63.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.63.0) | Sep 22, 2025 | 18.8.0 | 2.3.0 | 3.0.28 |
-| [0.62.2](https://github.com/tenstorrent/tt-metal/releases/tag/v0.62.2) | Aug 20, 2025 | 18.6.0 | 2.0.0 | 3.0.20 |
-| 0.61.0 | Skipped | - | - | - |
-| [0.60.1](https://github.com/tenstorrent/tt-metal/releases/tag/v0.60.1) | Jul 22, 2025 | 18.6.0 | 2.0.0 | 3.0.20 |
-| [0.59.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.59.0) | Jun 18, 2025 | - | - | - |
-| [0.58.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.58.0) | May 13, 2025 | - | - | - |
-| [0.57.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.57.0) | Apr 15, 2025 | - | - | - |
-| [0.56.0](https://github.com/tenstorrent/tt-metal/releases/tag/v0.56.0) | Mar 7, 2025  | - | - | - |
-
-Visit the [releases](https://github.com/tenstorrent/tt-metal/tree/main/releases) folder for details on releases, release notes, and estimated release dates.
-
-## Tenstorrent Bounty Program Terms and Conditions
-This repo is a part of Tenstorrent’s bounty program. If you are interested in helping to improve tt-metal, please make sure to read the [Tenstorrent Bounty Program Terms and Conditions](https://docs.tenstorrent.com/bounty_terms.html) before heading to the issues tab. Look for the issues that are tagged with both “bounty” and difficulty level!
-
-## License
-TT-Metalium and TTNN are licensed under the Apache 2.0 License, as detailed in [LICENSE](LICENSE) and [LICENSE_understanding.txt](LICENSE_understanding.txt).
-
-Some distributable forms of this project—such as manylinux-compliant wheels—may need to bundle additional libraries beyond the standard Linux system libraries. For example:
-
-- libnuma
-- libhwloc
-- openmpi (when built with multihost support)
-- libevent (when built with multihost support)
-
-These libraries are bound by their own license terms.
+# Qwen3.8-Flash-Next for 2 users at full 262K context on 4 x Blackhole p150b
+
+## Contents
+
+- [Accuracy at a glance](#accuracy-at-a-glance)
+- [Performance at a glance](#performance-at-a-glance)
+  - [Measured before the latest change](#measured-before-the-latest-change)
+- [What this repository is](#what-this-repository-is)
+- [Approach: how this implementation was built, and why](#approach-how-this-implementation-was-built-and-why)
+  - [The problem](#the-problem)
+  - [Why not compose upstream ttnn ops](#why-not-compose-upstream-ttnn-ops)
+  - [Why not vLLM](#why-not-vllm)
+  - [How decode was made fast](#how-decode-was-made-fast)
+  - [How prefill and multi-turn were handled](#how-prefill-and-multi-turn-were-handled)
+- [Performance comparison against the upstream model (FN)](#performance-comparison-against-the-upstream-model-fn)
+  - [Setup](#setup)
+  - [Summary](#summary)
+  - [Cold TTFT](#cold-ttft-client-first-token---submit-seconds)
+  - [Single-user decode, 1,000 tokens](#single-user-decode-1000-tokens)
+  - [Two users at the same instant](#two-users-submitted-at-the-same-instant-aggregate-toks--both-completions--last-end---first-submit)
+  - [GSM8K-64](#gsm8k-64-fns-own-toolsbenchmarkpy-against-both-servers-identical-dataset)
+  - [Agent load](#agent-load-closed-loop-over-real-agent-trajectories)
+  - [Caveats](#caveats)
+- [Evaluation results (accuracy)](#evaluation-results-accuracy)
+  - [Method](#method)
+- [How to run](#how-to-run)
+  - [Prerequisites](#prerequisites)
+  - [Build](#build)
+  - [Checkpoint and expert caches](#checkpoint-and-expert-caches)
+  - [Launch](#launch)
+  - [Core parameters](#core-parameters)
+  - [Requests](#requests)
+
+## Accuracy at a glance
+
+On the official benchmarks run so far, accuracy reproduces the official model-card numbers within measurement error:
+
+| benchmark | this implementation | official model card |
+|---|---|---|
+| GPQA Diamond (3 runs x 198) | 91.6 % | 91.7 |
+| LiveCodeBench v6 (131 problems x 3) | 92.1 % | 91.9 |
+| SWE-bench Multilingual (300 tasks) | 80.0 % | 81.0 |
+
+The other benchmarks on the official model card have **not been run yet**. Methods, and the code revisions these runs
+used, are in [Evaluation results](#evaluation-results-accuracy).
+
+## Performance at a glance
+
+Measured on 4 x Blackhole p150b with the previous code revision (see [Measured before the latest change](#measured-before-the-latest-change)):
+long-context mode, MTP speculative decode on, greedy.
+
+| context | prefill, cold: time to first token | prefill throughput | decode, 1 user | decode, 2 users (aggregate) |
+|---|---|---|---|---|
+| 8K | 1.79 s | 4,410 tok/s | 285 tok/s | 340 tok/s |
+| 32K | 7.33 s | 4,240 tok/s | 258 tok/s | 333 tok/s |
+| 128K | 35.8 s | 3,520 tok/s | 297 tok/s | - |
+| 250K | 80.2 s | 3,070 tok/s | 214 tok/s | 255 tok/s |
+
+**Resumed agent turn.** A new turn of about 1K tokens on top of an existing session reuses the session's saved state
+instead of re-reading the whole prompt. Time to first token p50 is 1.3 s for a 12-30K session and 1.6 s for a 40-60K
+session (closed-loop agent replay, one session).
+
+Notes:
+- **Prefill throughput** = prompt tokens / time to first token, for a cold prompt (no reuse).
+- **Decode, 1 user:** 1,000 generated tokens, 2.9-3.9 tokens per MTP pass. The 128K value is server-side, because that
+  response is a tool call, which the server sends as one chunk.
+- **Decode, 2 users:** both users decoding at the same time.
+  - At 8K and 32K: the mean of 3 runs (ranges 339.5-340.0 and 333.0-333.9 tok/s).
+  - At 250K: two users at about 246K tokens each (252-257 tok/s).
+  - These come from the validation runs of that revision. "-": not measured at that point.
+- The comparison with the upstream model and the method details are below.
+
+> All comparison numbers are final for the code revision they name. Measured 2026-11-21 on one machine, both servers
+> on the same tt-metal tree.
+
+> **This code was written by AI.** Everything this repository adds on top of upstream tt-metal was written by AI
+> coding agents (Anthropic's Claude, running in Claude Code): the model implementation and its kernels, the host API
+> additions, the tests, the launcher and this README. The same agents ran every measurement on this page. A human
+> engineer set the goals, reviewed the results and made the decisions. The upstream tt-metal code underneath is upstream's own work.
+
+### Measured before the latest change
+
+The performance, comparison and evaluation numbers on this page were measured on earlier revisions and were not
+re-measured. The latest change:
+- removes the 4 x 32K context mode: 2 users x 262,144 tokens is now the only mode;
+- stops allocating prefill scratch tensors that the served code paths never use, which frees 1.32 GB of DRAM per card:
+  free DRAM per card after start-up (MTP on) went from about 0.71 GB to about 2.03 GB;
+- renames the context variable to `QWEN38_CTX`.
+
+On the cards, the change gave bitwise-identical decode and server outputs on the validation prompts, and speed within
+the performance check's threshold, compared with the previous revision. The variable rename itself was checked
+off-card only.
+
+## What this repository is
+
+- **Base:** upstream [tenstorrent/tt-metal](https://github.com/tenstorrent/tt-metal) at commit
+  `d1a102793682817a4c12c572c44e6ad0277b5fe0`. Its history is kept unchanged.
+- **One commit on top** adds the following:
+  - **`models/demos/blackhole/qwen38_2x262k`:** Qwen3.8-Flash-Next serving two concurrent users, each with the full
+    262,144-token context, on four Blackhole p150b cards cabled as a 1D ring. It contains its own decode kernels (one program per layer stage), a device prefill
+    with KV-session reuse, MTP speculative decode, and an OpenAI-compatible HTTP server. It depends only on tt-metal
+    core (tt_metal kernel APIs, LLK, fabric, the `ttnn` Python API); see its [README](models/demos/blackhole/qwen38_2x262k/README.md).
+  - **Region writes:** small additions to the tt-metal / ttnn host API for byte-region and batched writes from pinned
+    host memory (`tt_metal/impl/tensor/byte_based_data_transfer_apis.cpp`, `ttnn` bindings). The model uses them for
+    its per-step host inputs.
+- **Upstream model left as is:** `models/demos/blackhole/qwen38_flash_next` (called **FN** below) is untouched, as
+  are upstream's own kernels.
+
+Upstream tt-metal's own README is at
+[github.com/tenstorrent/tt-metal](https://github.com/tenstorrent/tt-metal/blob/main/README.md).
+
+## Approach: how this implementation was built, and why
+
+This section summarises the engineering choices the AI agents made (see the note above), with the measurements
+behind them. Decode was the hard part, so most of it is about decode.
+
+### The problem
+- **Model:** Qwen3.8-Flash-Next has 48 layers. Every 4th layer is full attention (a sparse-selection attention with
+  an indexer); the other 36 are GDN linear-attention layers. Every layer ends in a mixture-of-experts block.
+- **Decode is latency-bound:** each step has to stream the active weights of all 48 layers from DRAM, plus run the
+  cross-card exchanges on a 4-card ring.
+- **Implication:** at 2 users the arithmetic is tiny. Step time is set by how close each stage gets to the DRAM / NoC
+  floor, and by how little fixed overhead (program launches, host round trips, synchronisation) sits between stages.
+
+### Why not compose upstream ttnn ops
+- **Speed:** a first prefill built from ttnn ops measured 5-45x slower than the hardware floor for these layers, 21x
+  over the per-layer bar.
+  - Each op is a separate program with its own launch, its own DRAM round trip for intermediates and its own
+    synchronisation.
+  - At decode sizes that fixed cost dominates. Upstream's own model on the same cards, which is built from ttnn ops,
+    runs about 40 ms per decode pass against about 11-14 ms here (see the comparison).
+- **Correctness:** two ttnn paths gave wrong results on this machine:
+  - the ring all-gather sometimes returned a stale 2-hop chunk;
+  - the chunked gated-delta-rule op loses precision on extreme-decay heads.
+- **What ttnn is still used for:** host runtime only, i.e. tensors, device / mesh handles, `generic_op` to launch our
+  own kernels, and trace capture / replay. All per-layer compute is in this repository's own kernels.
+
+### Why not vLLM
+- **Scheduling:** the serving policies that matter for this product do not fit vLLM's scheduler:
+  - two long-lived sessions of up to 262K tokens;
+  - resuming a session from its saved state instead of re-reading the prompt;
+  - slicing a long prefill into budgeted pieces that interleave with the other user's decode;
+  - MTP draft / verify with host-side acceptance;
+  - parking unused decode rows.
+- **What we built instead:** a small OpenAI-compatible server around the step driver. A vLLM adapter was planned with a
+  hard requirement of matching this server's speed and its greedy output bit for bit, and was dropped.
+
+### How decode was made fast
+1. **One program per sublayer per card.**
+   - The GDN sublayer (input projection, convolution, gates, fp32 recurrent-state update, gated norm, output
+     projection) is one program per card.
+   - The attention sublayer (projections, indexer, selection, attention) and the MoE sublayer (router, routed and
+     shared experts) are each one program per card too.
+   - So is the tail: final norm, LM head and per-card top-k.
+   - Intermediates stay in L1; nothing goes back to DRAM between ops.
+2. **Collectives inside the kernels.**
+   - The ring all-gathers run inside the compute programs over the fabric, as in upstream's DeepSeek-V3-B1 decode
+     kernels.
+   - They use explicit barriers after back-to-back multicasts and at kernel end. Without these barriers, two measured
+     hang classes on this hardware occur.
+3. **Weights streamed at the DRAM floor.**
+   - Weights are laid out per DRAM bank, so each core streams from its adjacent bank.
+   - Routed experts are 4-bit block floats in a tensor-parallel-4 layout.
+   - Measured: the routed-expert stream runs at about 506 GB/s per card, i.e. at the bandwidth limit. It costs 1.37 us
+     per selected expert per layer, independent of routing.
+4. **Bars from the floor, not from estimates.**
+   - Every stage got a bar of about 1.5x its measured hardware floor, measured under real ring and DRAM contention.
+   - Slow stages were profiled phase by phase and fixed at the root cause (NoC paths, bank placement, core counts,
+     kernel-config size) rather than tuned with constants.
+   - Upstream's DeepSeek-V3-B1 decode kernels were the side-by-side reference.
+5. **Everything resident, everything traced.**
+   - The decode step is captured as traces at start-up: one per attention length class and phase.
+   - Each step is a trace replay plus a few small host writes from pinned memory. The region-write host API is added
+     by this repository for that.
+   - All programs fit in the kernel-config ring at once, so no binary is re-sent during a step. Measured: about 25 us
+     saved per 8-sublayer cycle.
+6. **Four rows per step.**
+   - The step processes 4 rows at almost the cost of 1, because the weights are streamed once per step.
+   - Two rows carry the two users. The spare rows carry MTP verification: up to 3 draft tokens for one user, or 1 per
+     user for two users.
+   - Measured: 2.9-3.9 tokens per pass for one user.
+7. **Result:** without MTP, a decode step costs 7.66 ms (8K), 7.78 ms (32K) and 8.49 ms (128K) for one user, and
+   8.3-9.1 ms for two users. With MTP, one user decodes at 214-297 tok/s and two users together at 255-340 tok/s
+   (tables above).
+
+### How prefill and multi-turn were handled
+- **Own kernels:** prefill also runs on this repository's own multi-row kernels, with its own in-kernel ring
+  exchanges.
+- **Interleaving:** long prompts are processed in chunks that interleave with the other user's decode under a time
+  budget.
+- **Session reuse:** after each turn the session's state is saved, so the next turn only processes the new tokens.
+  That is the agent-load result in the comparison: 1.3-1.6 s to first token per turn (p50), against 49-127 s for the
+  upstream model, which re-reads the whole prompt when two sessions interleave.
+
+## Performance comparison against the upstream model (FN)
+
+### Setup
+- **Machine:** the same machine and the same tt-metal tree for both sides: 4 x Tenstorrent Blackhole p150b in one
+  host, cabled as a ring with two QSFP-DD cables per hop.
+- **Ours:** the production server command, with the same environment and arguments that `scripts/run_server.sh`
+  sets (see "How to run"; the launcher's environment was compared against the production command's, but the launcher
+  itself was not used for these runs). Long-context mode (2 slots x 262,144 tokens), MTP on (k = 3 drafts for one
+  user, k = 1 for two users). Fresh process.
+- **FN:** `models/demos/blackhole/qwen38_flash_next`, unmodified. It uses its `tt-quietbox` profile, which opens the
+  cards as a 1x4 line with its own mesh descriptor; ours opens them as a ring. FN configurations:
+
+  | FN configuration | allocation | MTP | validated by FN's README? |
+  |---|---|---|---|
+  | FN 32K | 32,768 tokens, one request at a time | `--mtp 4` | yes |
+  | FN 32K, 2 lanes | as FN 32K, plus `--lanes 2` | `--mtp 4` | no |
+  | FN 128K | 131,072 tokens | `--mtp 4` | no |
+  | FN 256K | 262,144 tokens | none (FN's admission model refuses MTP at this size) | no |
+
+- **Same request bodies on both sides:**
+  - greedy, thinking off, sampling fields stripped;
+  - both servers render identical token ids for every body (`prompt_tokens` checked per request; 0 mismatches);
+  - each cold-TTFT request carries a unique nonce and is checked to be a cold prefill on its server.
+- **Verdict rule:** a difference is called only when the min-max ranges of the repeats do not overlap. n = 2-3 per
+  point. Values are mean [min-max].
+
+### Summary
+
+| metric | ours | FN (FN 32K unless noted) | ours vs FN |
+|---|---|---|---|
+| cold TTFT, 8K prompt | 1.79 s | 9.13 s | 5.1x faster |
+| cold TTFT, 32K prompt | 7.33 s | 35.04 s | 4.8x faster |
+| single-user decode, 8K | 285 tok/s | 97 tok/s | 2.9x |
+| single-user decode, 32K | 258 tok/s | 88 tok/s | 2.9x |
+| two users, aggregate, 8K | 191 tok/s | 48 (FN 32K) / 58 (2 lanes) tok/s | 3.3-4.0x |
+| two users, aggregate, 32K | 86 tok/s | 21 (FN 32K) / 23 (2 lanes) tok/s | 3.8-4.1x |
+| GSM8K-64 accuracy | 89.1 % (57/64) | 89.1 % (57/64) | equal |
+| agent load, 1 session, 6 turns | 14.6 s | 55.8 s | 3.8x |
+| agent load, 2 interleaved sessions, 12 turns | 27.9 s | 326.8 s | 11.7x |
+| cold TTFT, 128K | 35.8 s | 156.4 s (FN 128K) | 4.4x faster |
+| cold TTFT, 250K | 80.2 s | 332.7 s (FN 256K) | 4.1x faster |
+| single-user decode, 128K | 297 tok/s | 101 tok/s (FN 128K) | 2.9x |
+| single-user decode, 250K | 214 tok/s | 34 tok/s (FN 256K, no MTP) | 6.3x |
+| agent load, 40-60K, 2 interleaved sessions, 12 turns | 44.7 s | 789.2 s (FN 128K) | 17.7x |
+
+### Cold TTFT (client first token - submit, seconds)
+
+| point | prompt tokens | ours | FN | FN configuration | ours / FN | verdict |
+|---|---|---|---|---|---|---|
+| 8K | 7,880-7,881 | 1.787 [1.782-1.790] n=3 | 9.133 [9.131-9.136] n=3 | FN 32K | 0.20 | ours faster |
+| 32K | 31,083-31,084 | 7.333 [7.306-7.361] n=3 | 35.042 [35.038-35.045] n=3 | FN 32K | 0.21 | ours faster |
+| 128K | 126,094-126,095 | 35.797 [35.745-35.848] n=2 | 156.423 [156.415-156.432] n=2 | FN 128K | 0.23 | ours faster |
+| 250K | 246,364-246,366 | 80.240 [80.227-80.254] n=2 | 332.732 [332.714-332.750] n=2 | FN 256K | 0.24 | ours faster |
+
+The server-side TTFT is 0.03-0.37 s lower than the client value on both sides.
+
+### Single-user decode, 1,000 tokens
+
+| point | ours tok/s | ours tokens / pass | ours ms / pass | FN tok/s | FN tokens / pass | FN ms / pass | verdict |
+|---|---|---|---|---|---|---|---|
+| 8K | 285.3 [274.6-302.7] n=3 | 3.21 | 11.3 | 96.6 [88.8-104.7] n=3 | 3.89 | 40.3 | ours faster |
+| 32K | 258.1 [245.5-269.1] n=3 | 3.09 | 12.0 | 88.3 [87.4-89.8] n=3 | 3.48 | 39.3 | ours faster |
+| 128K | 296.7 [295.2-298.2] n=2 (server-side) | 3.86 | - | 101.2 [101.0-101.5] n=2 (server-side) | 4.72 | - | ours faster |
+| 250K | 213.7 [208.8-218.6] n=2 | 2.92 | 13.7 | 34.0 [33.9-34.0] n=2 (FN 256K, no MTP) | 1 | 29.4 | ours faster |
+
+- FN accepts more tokens per pass (k = 4 against our k = 3), but each FN pass takes ~40 ms against our ~11-14 ms.
+- **Both 128K values are server-side.** That response is a tool call, and both servers send a tool call as one chunk
+  when it completes, so the client cannot time its tokens. The values are each server's per-request decode rate. For
+  the same requests, our server-side rate is 256-277 tok/s at 8K and 246-260 tok/s at 32K.
+
+### Two users submitted at the same instant (aggregate tok/s = both completions / (last end - first submit))
+
+| point | ours | FN 32K (one at a time) | FN 32K, 2 lanes | verdict |
+|---|---|---|---|---|
+| 8K | 191.2 [183.0-199.4] | 47.7 [46.5-48.9] | 58.0 [55.8-60.1] | ours faster (both) |
+| 32K | 86.4 [85.9-86.9] | 21.3 [21.3-21.4] | 22.8 [22.7-22.9] | ours faster (both) |
+| 128K | 24.9 [24.6-25.2] | ~6.0 (FN 128K, derived) | n/a (lanes fit only at 32K) | ours faster (derived) |
+| 250K | 11.6 [11.6-11.6] | ~2.8 (FN 256K, derived) | n/a | ours faster (derived) |
+
+- **Second user's TTFT, ours vs FN 32K:** 2.2 s vs 19.3 s at 8K; 13.7 s vs 82.2 s at 32K.
+- At 128K and 250K the aggregate is dominated by the two cold prefills, not by decode.
+- FN serves one request at a time, so its 128K / 250K two-user values are derived, not measured: 2 x (cold TTFT + 1,000 tokens at its measured decode rate).
+
+### GSM8K-64 (FN's own `tools/benchmark.py` against both servers, identical dataset)
+
+| side | accuracy | Wilson 95 % | mean TTFT | aggregate output tok/s | truncated at max_tokens |
+|---|---|---|---|---|---|
+| ours | 0.891 (57/64) | [0.791, 0.946] | 0.178 s | 272.4 | 7 |
+| FN 32K | 0.891 (57/64) | [0.791, 0.946] | 0.284 s | 97.1 | 7 |
+
+Accuracy is equal: the confidence intervals overlap.
+
+### Agent load (closed loop over real agent trajectories)
+
+This was one run per configuration (n = 1), so a difference is called only beyond 2x.
+
+| set | leg | side | turns | per-turn wall p50 / max (s) | TTFT p50 (s) | leg total (s) | prefill path |
+|---|---|---|---|---|---|---|---|
+| 12-30K tokens | 1 session | ours | 6 | 2.24 / 3.86 | 1.28 | 14.6 | 1 cold, 5 resumed |
+| 12-30K tokens | 1 session | FN 32K | 6 | 8.28 / 16.75 | 5.22 | 55.8 | 1 reset, 5 restored |
+| 12-30K tokens | 2 interleaved | ours | 12 | 4.12 / 9.48 | 1.84 | 27.9 | 2 cold, 10 resumed |
+| 12-30K tokens | 2 interleaved | FN 32K | 12 | 51.78 / 76.16 | 48.59 | 326.8 | 12 reset |
+| 40-60K tokens | 1 session | ours | 6 | 2.61 / 10.78 | 1.58 | 23.0 | 1 cold, 5 resumed |
+| 40-60K tokens | 2 interleaved | ours | 12 | 4.65 / 23.67 | 2.16 | 44.7 | 2 cold, 10 resumed |
+| 40-60K tokens | 1 session | FN 128K | 6 | 10.67 / 53.94 | 6.87 | 101.8 | 1 reset, 5 restored |
+| 40-60K tokens | 2 interleaved | FN 128K | 12 | 130.09 / 155.23 | 126.50 | 789.2 | 12 reset |
+
+FN keeps one committed stream plus one prompt-end snapshot. With two interleaved sessions it re-prefills the whole
+prompt on every turn (12 of 12 turns). Ours resumes each session from its saved state.
+
+### Caveats
+- **Tree.** FN was measured in the same tree as ours. Besides the model directories, that tree differed from
+  upstream in a few files: the region-write additions above, and **two decode fast-path kernels in
+  `ttnn/.../experimental/ccl/moe_compute` that FN calls**. Those two kernels are **not in this repository**: here
+  FN runs on upstream's kernels. The fast paths make FN's decode equal or faster, so the comparison can only
+  understate our margin. This is inferred and was not re-measured on this tree.
+- **Topology.** FN opens a 1x4 line; ours opens a ring.
+- **FN configurations.** Only FN 32K is FN's validated configuration. The others are marked as not validated.
+- **MTP.** The settings differ by design: FN k = 4, ours k = 3 (one user) or 1 (two users). FN 256K runs without
+  MTP because FN's admission model refuses it at that size.
+- **Repeats.** n = 2-3 per point. Every "ours faster" verdict has non-overlapping ranges. The agent-load table is
+  one run.
+- **Code revision.** Our numbers were measured on an earlier production revision: this commit's code before the
+  latest change (see [Measured before the latest change](#measured-before-the-latest-change)) and before the clean-up
+  for publication, plus the two moe_compute kernels. The clean-up:
+  - edits comments, docstrings and log / help text only, apart from neutral default paths;
+  - removes development tests, probes and tools that the server does not import.
+
+  Nothing was re-measured on this exact commit.
+
+## Evaluation results (accuracy)
+
+These runs used **earlier revisions of this code**, before MTP was added and before the rebase onto the current
+upstream base. They were **not re-run on this commit**.
+
+- **MTP and greedy output.** MTP verification keeps greedy output bitwise identical to plain decode; the production
+  gates measure this.
+- **MTP and sampled output.** For sampled output, MTP verification is designed to preserve the output distribution.
+  This is inferred from the method, not measured.
+
+| benchmark | ours | official model card |
+|---|---|---|
+| GPQA Diamond, 3 seeds x 198 questions | 91.58 % mean (91.41 / 91.92 / 91.41 %; 181 / 182 / 181 correct), sd 0.29, pooled SE +/-1.14 | 91.7 |
+| LiveCodeBench v6, problems dated 2025-02-01 .. 2025-05-01, 131 problems x n = 3 = 393 samples | 92.11 % pass@1 | 91.9 |
+| SWE-bench Multilingual, 300 tasks | 80.0 % (240/300) | 81.0 |
+| GSM8K-64 (FN's `tools/benchmark.py`, greedy) | 89.1 % (57/64); FN 89.1 % on the same set | n/a |
+
+### Method
+
+- **GPQA Diamond:**
+  - simple-evals style prompt, regex answer extraction;
+  - long-context mode (262K); the server's default sampling (temperature 1.0, top_p 0.95, top_k 20);
+  - `reasoning_effort` xhigh;
+  - 0 unparsed answers, 0 errors.
+- **LiveCodeBench v6:**
+  - **Headline:** `lcb_runner` (commit 28fef95) at 30 s per test, plus a recheck of its failures with a real stdin.
+    `lcb_runner`'s mock stdin misjudges code that reads `sys.stdin.buffer`.
+  - **Plain `lcb_runner`:** the same samples score 86.77 % (easy 100.0 / medium 90.6 / hard 77.6).
+  - No `max_tokens`; the model's recommended sampling.
+- **SWE-bench Multilingual:**
+  - mini-swe-agent.
+  - **As run: 222/300 = 74.0 %.** 24 submissions were missed because of a bug in the harness's submit detection.
+  - **240/300:** with that bug fixed (the first submission of each trajectory) and the tasks re-graded.
+- **GSM8K-64:** run on the production revision of the comparison above.
+
+## How to run
+
+### Prerequisites
+
+| item | version used for the numbers above |
+|---|---|
+| hardware | 4 x Tenstorrent Blackhole p150b in one host, QSFP-DD ring 1-2-3-4-1 with 2 cables per hop |
+| card firmware | 19.17.1.0 (ethernet firmware 1.13.1) |
+| kernel driver (tt-kmd) | 2.11.0 |
+| OS | Ubuntu 22.04 LTS, Linux kernel 6.8 |
+| hugepages | 1 GiB hugepages, as set up by tt-metal's install instructions; the measured host had 16 |
+| host memory | the server refuses to serve if MemAvailable is below 40 GB after start-up (`--min-mem-gb`); our host had 256 GB |
+| Python | 3.12 (`./create_venv.sh --python-version 3.12`) |
+| tt-metal | this repository (upstream base `d1a102793682` + this commit) |
+| checkpoint | [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) at revision `f5d08274bafd880402bd16f5e3e6c514136ec06c` (131 shards, ~360 GB); the loader checks the revision and the shard manifest |
+
+### Build
+
+Measured on the host above: a full build takes about 7-11 minutes with 8 parallel jobs.
+
+**1. Clone.** The full upstream history is large; a shallow clone is enough to build.
+
+```bash
+git clone --depth 1 --recurse-submodules --shallow-submodules \
+    https://github.com/rayy3535/tt-metal-qwen38-p150b.git
+cd tt-metal-qwen38-p150b
+```
+
+**2. System dependencies** (once per host, needs sudo). This is upstream's script; see [INSTALLING.md](INSTALLING.md)
+for details, including the kernel driver, firmware and hugepages setup.
+
+```bash
+sudo ./install_dependencies.sh
+```
+
+**3. Python environment.** Python 3.12. `--force` replaces an existing `python_env`.
+
+```bash
+./create_venv.sh --python-version 3.12 --force
+source python_env/bin/activate
+```
+
+Run every build step inside this activated environment. Otherwise CMake can pick up another Python's headers, and
+`import ttnn` then fails.
+
+**4. Configure and build.**
+
+```bash
+export CMAKE_BUILD_PARALLEL_LEVEL=8        # cap the parallel jobs; more can exhaust host memory
+cmake -S . -B build_Release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$PWD/build_Release" -DTT_X86_MARCH=x86-64-v3 \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/x86_64-linux-clang-20-libstdcpp-toolchain.cmake \
+    -DTT_MATMUL_MODEL_FETCH=OFF
+./build_metal.sh --build-type Release
+```
+
+- **`TT_MATMUL_MODEL_FETCH=OFF`** skips the download of ttnn's optional matmul config model blob from a container
+  registry. The published numbers were measured with it off, and this model does not use it. Drop the flag to get
+  upstream's default (fetch on); a failed fetch then fails the configure step.
+- **The separate `cmake` call** only pre-sets that cache option. `build_metal.sh` reconfigures with the same generator,
+  build type and toolchain, and keeps it. Without the flag, `./build_metal.sh --build-type Release` alone is enough.
+- **Do not build while the server is running.** The server pins most of the host memory, and a parallel build next to
+  it can run the host out of memory.
+
+**5. Check the build.** These steps need no device.
+
+```bash
+python -c "import ttnn; print(ttnn.__file__)"
+python -m pytest models/demos/blackhole/qwen38_2x262k/tests/test_serve_cpu.py -q     # CPU-only server tests
+```
+
+The device kernels are not built here. The server compiles them on its first start (see Launch) into
+`TT_METAL_CACHE`.
+
+### Checkpoint and expert caches
+
+```bash
+huggingface-cli download Qwen/Qwen3.8-Flash-Next --revision f5d08274bafd880402bd16f5e3e6c514136ec06c \
+    --local-dir ~/qwen38/weights/Qwen3.8-Flash-Next
+# BF4 routed-expert caches, host only (no device), ~64 GB + ~1.4 GB
+python -m models.demos.blackhole.qwen38_2x262k.tools.convert_tp4 --checkpoint ~/qwen38/weights/Qwen3.8-Flash-Next \
+    --out ~/qwen38/cache/bf4-experts-tp4-v1
+python -m models.demos.blackhole.qwen38_2x262k.tools.convert_tp4 --checkpoint ~/qwen38/weights/Qwen3.8-Flash-Next \
+    --out ~/qwen38/cache/bf4-experts-tp4-mtp-v1 --mtp
+```
+
+- **Backbone expert cache:** the server reads it from `~/qwen38/cache/bf4-experts-tp4-v1`. That path is fixed in
+  `driver/model.py`; use a symlink to keep the cache elsewhere.
+- **MTP expert cache:** default `~/qwen38/cache/bf4-experts-tp4-mtp-v1/mtp-00`; set `MTP_TP4` to move it.
+
+### Launch
+
+```bash
+models/demos/blackhole/qwen38_2x262k/scripts/run_server.sh                 # serves on 127.0.0.1:8020
+models/demos/blackhole/qwen38_2x262k/scripts/run_server.sh --print-env     # show the environment and command; start nothing
+```
+
+- **First start:** the kernels are compiled into `TT_METAL_CACHE`; later starts reuse that cache.
+- **Mesh descriptor:** the launcher's default `mgd/p150_4x1_ring_pinned.textproto` pins the mesh rows to the PCI bus
+  numbers of the measured host. On another host, edit the pinning or set
+  `TT_MESH_GRAPH_DESC_PATH=models/demos/blackhole/qwen38_2x262k/mgd/p150_4x1_ring.textproto`.
+- **Start-up DRAM:** after loading, the server logs the free DRAM per card in its `START` line: about 2.03 GB per card
+  with MTP on.
+- **Restarting after a hang:** on a device hang the server exits with code 124, and the cards then need
+  `tt-smi -r` before the next start.
+- **Supervisor not included.** The measured deployment ran the server under a site-specific supervisor. On a hang it
+  captured debug state, reset the cards and restarted. That supervisor is not included; any process manager that
+  runs `tt-smi -r` and restarts the launcher does the same job.
+
+### Core parameters
+
+| parameter | where | meaning | value used | allowed values |
+|---|---|---|---|---|
+| `QWEN38_CTX` | env | context mode | `262144` | unset or `262144`: 2 slots x 262,144 tokens, the only mode (each request may use up to 262,080 tokens of prompt + `max_tokens`); any other value is refused at start-up. The earlier 4 x 32K mode was removed |
+| `PF_SERVE` | env | device prefill inside the server; `0` feeds prompts through the decode path | `1` | `1` (default), `0` |
+| `MOE_LIVE` | env | the MoE router builds the expert union from live slots only (parked slots get no experts) | `1` | `1` (default), `0` |
+| `--mtp` | server flag | MTP speculative decode, decided at start-up | `auto` | `auto` (default: on with `PF_SERVE=1`, else off), `on`, `off` |
+| `--host` / `--port` | server flags | HTTP bind address | `127.0.0.1` / `8020` | any |
+| `--min-mem-gb` | server flag | refuse to serve if host MemAvailable after start-up is below this | `40` (default) | GB, float |
+| `--checkpoint` | server flag | checkpoint directory | `$QWEN38_CHECKPOINT` | path |
+| `reasoning_effort` | request field | thinking level of the chat template | `xhigh` (default, no thinking cap) | `xhigh`, `medium`, `low` (OpenAI values are mapped to these) |
+| sampling | request fields | a request without sampling fields uses the checkpoint's `generation_config` | temperature 1.0, top_p 0.95, top_k 20 | `temperature: 0` gives greedy; `SV_DEFAULT_SAMPLING=greedy` makes greedy the default |
+| `TT_MESH_GRAPH_DESC_PATH` | env | mesh graph descriptor (4x1 ring) | `mgd/p150_4x1_ring_pinned.textproto` | a 4x1 RING descriptor |
+| `TT_METAL_CACHE` | env | JIT kernel cache directory | `~/.cache/qwen38_2x262k/jit-cache` | path |
+| hang watchdog | built in | a device call that does not return within its timeout (decode replay 10 s, host-side work 600 s, a prefill action `--prefill-timeout` 45 s) fails the open requests; if the call still has not returned after a 10 s grace, the process exits with code 124 | defaults | `--hold-on-hang` keeps the process alive instead (for live debugging under a supervisor) |
+| `WORKER_L1` | env | L1 bytes per worker core for the kernel config ring | `1300000` | integer, or `default` for tt-metal's default |
+| `--prefill-budget-ms` | server flag | while other slots decode, run prefill in slices of about this many ms per step | `25` (default) | ms; `0` = one prefill chunk per decode step |
+| `--prefill-min-tokens` | server flag | fresh prompts with at least this many tokens use the device prefill; shorter ones are fed through decode | `48` (default) | integer |
+
+The launcher also exports the decode and prefill kernel configuration (`GDN_*`, `QC_*`, `QSA_*`, `QIX_*`, `QAS_*`,
+`PF_*`, `B4_AG_*`, `FID`, `XS0`). These are the measured configuration; leave them as they are.
+
+### Requests
+
+```bash
+curl -s http://127.0.0.1:8020/health          # 200 {"status": "ready", ...} once serving; 503 while starting
+curl -s http://127.0.0.1:8020/v1/models
+curl -s http://127.0.0.1:8020/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "Qwen/Qwen3.8-Flash-Next",
+  "messages": [{"role": "user", "content": "What is 17 * 23?"}],
+  "max_tokens": 2048,
+  "reasoning_effort": "low"
+}'
+```
+
+`"stream": true` gives server-sent events. The reasoning text comes back in `reasoning_content`, separate from the
+answer in `content`.
