@@ -46,8 +46,8 @@ used, are in [Evaluation results](#evaluation-results-accuracy).
 
 ## Performance at a glance
 
-Measured on 4 x Blackhole p150b with the previous code revision (see [Measured before the latest change](#measured-before-the-latest-change)):
-long-context mode, MTP speculative decode on, greedy.
+Measured on 4 x Blackhole p150b with an earlier code revision (see [Measured before the latest change](#measured-before-the-latest-change),
+which also lists what the latest change gained): long-context mode, MTP speculative decode on, greedy.
 
 | context | prefill, cold: time to first token | prefill throughput | decode, 1 user | decode, 2 users (aggregate) |
 |---|---|---|---|---|
@@ -81,14 +81,49 @@ Notes:
 ### Measured before the latest change
 
 The performance, comparison and evaluation numbers on this page were measured on earlier revisions and were not
-re-measured. The latest change:
+re-measured.
+
+**The latest change** moves host work around the MTP verify state to the device (MTP mode only):
+- the prefill's commit into the verify state seeds the GDN conv history inside the device commit program, instead of a
+  host read-modify-write;
+- the verify ring rows of a new prompt are written as at most two region writes, without reading them back first;
+- a slot reset is one device zero-fill program;
+- the MTP draft head's per-pass host inputs are written through pre-built host tensors that alias their buffers,
+  instead of new host tensors on every pass.
+
+Measured on the cards against the previous revision on the same day. The first four rows are one run per revision
+(p50 over 60 resumed turns; the ~119K-token row is a single reset each). The decode, throughput and time-to-first-token
+rows are means of 3 + 3 server runs, and the 32K cold prompt was checked again in a second measurement (2 + 2 runs).
+These runs use their own request sequence, so their absolute values differ from the table at the top; compare the
+two columns with each other only:
+
+| metric | previous revision | this revision |
+|---|---|---|
+| prefill commit of a resumed turn, p50 | 37.6 ms | 3.7 ms |
+| slot reset of a resumed turn, p50 | 7.8 ms | 2.0 ms |
+| slot reset for a new turn after a ~119K-token session | 84 ms | 11 ms |
+| MTP draft-input host writes, p50 per pass | 145 us | 70 us |
+| decode step, 1 or 2 users, 8K-128K | | 0.08-0.11 ms shorter |
+| aggregate throughput on the request sets | | +1.5 % to +4.9 % (GSM8K and Chinese prompt sets); +0.5 % or within run-to-run spread (software-engineering prompt set) |
+| cold time to first token, 8K | 1.88 s | 1.77 s |
+| cold time to first token, 32K | 7.35 s | 7.52 s |
+| cold time to first token, 128K and 250K | | unchanged within run-to-run spread |
+
+- **Cold 32K is slower** by about 0.15-0.2 s (+2-3 %), reproduced in both measurements. It is not attributable to any
+  single one of the four items, and is about the size of the previous revision's own run-to-run spread in the second
+  measurement (0.13 s). It was accepted for the gains above.
+- Server outputs (greedy, MTP on and off) were bitwise identical to the previous revision on the validation prompts.
+- A fifth item, no prefill key copy (`PF_NOKC`), is on by default in MTP mode in the code, but is not yet validated
+  together with the other four. The launcher sets `PF_NOKC=0`, which is the measured configuration.
+
+**The change before that:**
 - removes the 4 x 32K context mode: 2 users x 262,144 tokens is now the only mode;
 - stops allocating prefill scratch tensors that the served code paths never use, which frees 1.32 GB of DRAM per card:
   free DRAM per card after start-up (MTP on) went from about 0.71 GB to about 2.03 GB;
 - renames the context variable to `QWEN38_CTX`.
 
-On the cards, the change gave bitwise-identical decode and server outputs on the validation prompts, and speed within
-the performance check's threshold, compared with the previous revision. The variable rename itself was checked
+On the cards, that change gave bitwise-identical decode and server outputs on the validation prompts, and speed within
+the performance check's threshold, compared with the revision before it. The variable rename itself was checked
 off-card only.
 
 ## What this repository is
@@ -314,8 +349,8 @@ prompt on every turn (12 of 12 turns). Ours resumes each session from its saved 
   MTP because FN's admission model refuses it at that size.
 - **Repeats.** n = 2-3 per point. Every "ours faster" verdict has non-overlapping ranges. The agent-load table is
   one run.
-- **Code revision.** Our numbers were measured on an earlier production revision: this commit's code before the
-  latest change (see [Measured before the latest change](#measured-before-the-latest-change)) and before the clean-up
+- **Code revision.** Our numbers were measured on an earlier production revision: this code before the
+  two latest changes (see [Measured before the latest change](#measured-before-the-latest-change)) and before the clean-up
   for publication, plus the two moe_compute kernels. The clean-up:
   - edits comments, docstrings and log / help text only, apart from neutral default paths;
   - removes development tests, probes and tools that the server does not import.
@@ -473,6 +508,8 @@ models/demos/blackhole/qwen38_2x262k/scripts/run_server.sh --print-env     # sho
 | `QWEN38_CTX` | env | context mode | `262144` | unset or `262144`: 2 slots x 262,144 tokens, the only mode (each request may use up to 262,080 tokens of prompt + `max_tokens`); any other value is refused at start-up. The earlier 4 x 32K mode was removed |
 | `PF_SERVE` | env | device prefill inside the server; `0` feeds prompts through the decode path | `1` | `1` (default), `0` |
 | `MOE_LIVE` | env | the MoE router builds the expert union from live slots only (parked slots get no experts) | `1` | `1` (default), `0` |
+| `P1K_SEED`, `P1K_R16`, `MTP_V3W`, `P1K_DEVRESET` | env | MTP mode only: conv-history seed inside the device commit; verify ring rows without read-back; pre-built draft-input host tensors; device slot reset | unset (on in MTP mode) | unset or `1`: on in MTP mode; `0` turns one off; with MTP off only unset or `0` |
+| `PF_NOKC` | env | MTP mode only: no prefill key copy (every card writes the user's own index-pool pages) | `0` (launcher) | `0`; unset or `1` turns it on (the code's MTP-mode default), not yet validated together with the four items above; `1` needs `MTP3_IPALL=1`, which MTP mode sets |
 | `--mtp` | server flag | MTP speculative decode, decided at start-up | `auto` | `auto` (default: on with `PF_SERVE=1`, else off), `on`, `off` |
 | `--host` / `--port` | server flags | HTTP bind address | `127.0.0.1` / `8020` | any |
 | `--min-mem-gb` | server flag | refuse to serve if host MemAvailable after start-up is below this | `40` (default) | GB, float |
