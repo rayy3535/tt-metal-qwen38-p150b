@@ -53,7 +53,7 @@ these tables were not re-measured, see [Caveats](#caveats)): long-context mode, 
 |---|---|---|---|---|
 | 8K | 1.79 s | 4,410 tok/s | 285 tok/s | 340 tok/s |
 | 32K | 7.33 s | 4,240 tok/s | 258 tok/s | 333 tok/s |
-| 128K | 35.8 s | 3,520 tok/s | 297 tok/s | - |
+| 128K | 35.8 s | 3,520 tok/s | 297 tok/s | 312 tok/s |
 | 250K | 80.2 s | 3,070 tok/s | 214 tok/s | 255 tok/s |
 
 **Resumed agent turn.** A new turn of about 1K tokens on top of an existing session reuses the session's saved state
@@ -66,8 +66,12 @@ Notes:
   response is a tool call, which the server sends as one chunk.
 - **Decode, 2 users:** both users decoding at the same time.
   - At 8K and 32K: the mean of 3 runs (ranges 339.5-340.0 and 333.0-333.9 tok/s).
+  - At 128K: two users at about 131K tokens each (308-317 tok/s, n = 2). Both resume from their saved prompt state and
+    then decode 1,000 tokens each together; aggregate = all generated tokens / (last end - first token). Measured
+    2026-11-23 on a later revision (the prefill indexer change), whose 2-user decode at 8K / 32K / 250K is within 3 % of
+    or above the other values in this column (332-343 / 335-336 / 266-268 tok/s).
   - At 250K: two users at about 246K tokens each (252-257 tok/s).
-  - These come from the validation runs of that revision. "-": not measured at that point.
+  - The 8K / 32K / 250K values come from the validation runs of that revision.
 - The comparison with the upstream model and the method details are below.
 
 > All comparison numbers are final for the code revision they name. Measured 2026-11-21 on one machine, both servers
