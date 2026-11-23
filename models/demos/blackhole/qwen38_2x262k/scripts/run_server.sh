@@ -39,6 +39,9 @@ export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost
 
 # Serving mode: 2 slots x 262,144-token context, device prefill in the server, live MoE expert path.
 export QWEN38_CTX=262144 PF_SERVE=1 MOE_LIVE=1
+# MTP-mode switches (serve/mtp_serve.py turns all five on in MTP mode; an explicit 0 keeps one off).  The prefill
+# key-copy removal (PF_NOKC) stays off: it is not yet validated together with the other four.
+export PF_NOKC=0
 # Seconds to retry a busy port at start-up (a restarted server waits for the previous one to release it).
 export B4_SERVE_BIND_RETRY_S=120
 

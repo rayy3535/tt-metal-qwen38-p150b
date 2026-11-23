@@ -9,7 +9,8 @@ into decode's slot.
   Partial chunk (V < C valid rows): pad_mask zeroes g / beta / k / v of rows >= V in GIN's scan layouts (pm_rd), so S
   is untouched there; GN zeroes the gated rows >= V (Gout.valid), so y_part rows >= V are 0.
   commit(state, rings, u, g): decode's state tiles [192 u, 192 u + 192) <- S, row u of ring[(g + 1 + i) % 4] <- T row
-  29 + i (cm_rd)."""
+  29 + i (cm_rd).
+  commit_v (P1K_SEED, MTP verify layout): commit + the conv8 records of the committed rows (cmv_rd)."""
 
 from __future__ import annotations
 
@@ -167,3 +168,40 @@ class Stage:
             rd = fp.reader_kernel(_KDIR + "cm_rd.cpp", cs, sum((fp.accessor_args(t) for t in ins), []), rt)
             self._p[key] = _mesh_prog(self.mesh, fp.program_descriptor([rd], cbs))
         ttnn.generic_op(ins, self._p[key])
+
+    def commit_v(self, state, rings, w, g, conv8, rec):
+        """(P1K_SEED=1; MTP verify layout) commit() + the conv8 seed in one program (kernels/cmv_rd.cpp): the same
+        state / ring writes as commit(state, rings, w, g), and for each lag i in rec's mask the conv8 records of T row 29 + i
+        (= what the host seed reads back from ring row w).  rec = (mask, (pb_0, pb_1, pb_2), (ob_0, ob_1, ob_2), ps, os) from
+        driver/conv8.py seed_args().  One descriptor per (tensor addresses, w) as commit(); the record args (user /
+        position dependent) are written into the cached descriptor's runtime args per call (RtSlots)."""
+        R = [rings[(g + 1 + i) % 4] for i in range(3)]
+        ins = [self.S, self.T, state] + R + [conv8]
+        mask, pb, ob, ps, os_ = rec
+        assert 0 <= mask < 8 and len(pb) == 3 and len(ob) == 3
+        vals = [conv8.buffer_address(), mask, *pb, *ob, ps, os_]
+        key = ("commitv",) + tuple(t.buffer_address() for t in ins) + (w,)
+        sl = self._p.get(key)
+        if sl is None:
+            cores, cs = _cores(self.mesh, 16)
+            cbs = [fp.cb_descriptor(0, ttnn.float32, 4096, 1, cs), fp.cb_descriptor(1, ttnn.bfloat16, 2048, 1, cs),
+                   fp.cb_descriptor(2, ttnn.bfloat16, 2048, 1, cs)]  # fmt: skip
+            ia = [t.buffer_address() for t in ins[:6]]
+            rt = [
+                (c, ia + [w, sf, sn, qf, qn] + vals)
+                for c, (sf, sn), (qf, qn) in zip(cores, _split(192, 16), _split(240, 16))
+            ]
+            rd = fp.reader_kernel(_KDIR + "cmv_rd.cpp", cs, sum((fp.accessor_args(t) for t in ins), []), rt)
+            sl = self._p[key] = RtSlots(_mesh_prog(self.mesh, fp.program_descriptor([rd], cbs)))
+            sl.v, sl.last = sl.views(0, cores), tuple(vals)
+            count("P1K_SEED", "build")
+        elif sl.last != tuple(vals):
+            for rs in sl.v:
+                for r in rs:
+                    for j, x in enumerate(vals):
+                        r[11 + j] = int(x)
+            sl.last = tuple(vals)
+            count("P1K_SEED", "patch")
+        else:
+            count("P1K_SEED", "hit")
+        ttnn.generic_op(ins, sl.mpd)

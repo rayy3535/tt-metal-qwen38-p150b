@@ -272,7 +272,10 @@ class PrefillChain:
             if lay.kind == "G":
                 live += [lay.A.stage.S, lay.A.stage.T]
         live.append(self.pled.HIST)
-        live += [lay.A.st["kc"] for lay in self.L if lay.kind == "Q"]
+        kcs = [lay.A.st["kc"] for lay in self.L if lay.kind == "Q"]
+        assert all(k is None for k in kcs) or all(k is not None for k in kcs)
+        nokc = kcs and kcs[0] is None  # (PF_NOKC) no key copy: nothing of it to checkpoint
+        live += [] if nokc else kcs
         self.ck_live = live
 
         def like(t):
@@ -285,7 +288,8 @@ class PrefillChain:
         self.ckb = [[like(t) for t in live] if s_ < nck else None for s_ in range(4)]
         self.ck_ctx = [None] * 4
         self.log(
-            f"START prefill checkpoints (PF_PREFIX_REUSE=1): {nck} slots x {len(live)} tensors (36 GDN S / T, HIST, 12 KC), "
+            f"START prefill checkpoints (PF_PREFIX_REUSE=1): {nck} slots x {len(live)} tensors (36 GDN S / T, HIST, "
+            f"{'no KC: PF_NOKC' if nokc else '12 KC'}), "
             f"PageCopy {CK_CORES} cores, ~{nck * sum(math.prod(t.padded_shape) * (4 if t.dtype == ttnn.float32 else 2) for t in live) / 1e6:.1f} MB per card"
         )
 

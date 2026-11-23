@@ -41,6 +41,7 @@ from models.demos.blackhole.qwen38_2x262k import moe_layer as ml
 from models.demos.blackhole.qwen38_2x262k import qsa_attn as qa
 from models.demos.blackhole.qwen38_2x262k import qsa_card as qc
 from models.demos.blackhole.qwen38_2x262k import qsa_layer as ql
+from models.demos.blackhole.qwen38_2x262k.driver import conv8 as c8
 from models.demos.blackhole.qwen38_2x262k.ple import host as ph_
 from models.demos.blackhole.qwen38_2x262k.qsa import cache as C
 
@@ -324,7 +325,7 @@ class StepModel:
                 if (
                     ql.vfy_on()
                 ):  # MTP3_VFY: the verify build's conv history (row user * 8 + pos % 8, channel order)
-                    lay.conv8 = rdev(torch.zeros(1, 1, 32, H), ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT)
+                    lay.conv8 = rdev(torch.zeros(*c8.C8_SHAPE), ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT)
                     lay.A.vfy_t = SimpleNamespace(pin=qsh["pos"], conv8=lay.conv8)
                 del full, shards
             w = moe_w(i)
@@ -657,6 +658,78 @@ class StepModel:
         ttnn.copy_host_to_device_tensor_region(h, t_, 0)
         return h
 
+    def _reset_pieces(self, u: int, kv_blocks, keep_below: int):
+        """reset_slot's KV / index pool block pieces of slot u: [(first block, blocks)] (relative to base[u])."""
+        kvb = self.npu if kv_blocks is None else min(self.npu, max(0, kv_blocks))
+        kvb = min(kvb, self.sblocks[u])  # a parked slot of the long mode owns no blocks
+        # in chunks of 64 blocks (one cached zero host tensor per pool kind, not one per high-water size)
+        CH = 64
+        kvb = min(self.npu, -(-kvb // CH) * CH)
+        assert keep_below == 0 or (keep_below % 512 == 0 and keep_below >= 8 * 32 * qa.MIR_S), keep_below
+        b0 = keep_below // 64
+        pieces = []  # (first block, blocks): from b0 up to the next multiple of CH, then CH-block pieces (<= 8 sizes)
+        c0 = b0
+        while c0 < kvb:
+            n_ = min(CH - c0 % CH, kvb - c0)
+            pieces.append((c0, n_))
+            c0 += n_
+        return pieces
+
+    def reset_items(self, u: int, kv_blocks: int | None = None, keep_below: int = 0):
+        """(P1K_DEVRESET) exactly the bytes reset_slot_users(u, kv_blocks, keep_below) + vfy_zero_user(u) zero, as zero-fill
+        items per card [(tensor, page bytes, first page, pages, offset, bytes per page)] (the same expressions: the KV / ipool
+        pieces of _reset_pieces on every card, the mirror iff not keep_below, the raw ring row u, ixout on card u only (its
+        whole copy), conv8 user_regions(u) per GDN layer, ring16 rows 16 u .. 16 u + 15, ring8 page u per QSA layer)."""
+        from models.demos.blackhole.qwen38_2x262k.ple import device as pdv
+
+        def run(t_, ps, lo, nb):  # a page-aligned byte range of t_ -> one item
+            assert lo % ps == 0 and nb % ps == 0 and nb > 0, (lo, nb, ps)
+            return (t_, ps, lo // ps, nb // ps, 0, ps)
+
+        mir_pages = 8 * 16 * qa.MIR_S
+        pieces = self._reset_pieces(u, kv_blocks, keep_below)
+        common, own = [], []
+        for lay in self.qlays:
+            t = lay.t
+            if pieces:  # the pieces are contiguous blocks: one run per pool (the same bytes as the per-piece writes)
+                c0, c1 = pieces[0][0], pieces[-1][0] + pieces[-1][1]
+                assert all(b == a + n for (a, n), (b, _) in zip(pieces, pieces[1:]))
+                common.append(run(t["kv"], 4096, 16 * (self.base[u] + c0) * 4096, 16 * (c1 - c0) * 4096))
+                common.append(run(t["ipool"], 4096, (self.base[u] + c0) * 4096, (c1 - c0) * 4096))
+            if not keep_below:
+                common.append(run(t["mir"], 2048, mir_pages * u * 2048, mir_pages * 2048))
+            common.append(run(t["ring"], 1024, u * 1024, 1024))
+            ow = qc.OUT_W() * 4  # ixout: card u's whole copy ([1, 1, 65, OUT_W] uint32 per card, one row per page)
+            assert int(t["ixout"].shape[-1]) * 4 == ow
+            own.append(run(t["ixout"], ow, 0, int(np.prod(list(t["ixout"].shape)[:-1])) * ow))
+        for lay in self.glays:
+            for lo, hi in c8.region_bytes(c8.user_regions(u)):
+                common.append(run(lay.conv8, c8.PAGE, lo, hi - lo))
+        rb = len(pdv.E_CORES) * 512
+        common.append(run(self.ple.ring16, rb, 16 * u * rb, 16 * rb))
+        for lay in self.qlays:
+            common.append(run(lay.t["ring8"], 2048, u * 2048, 2048))
+        return [common + (own if c == u else []) for c in range(CARDS)]
+
+    def reset_dev(self, u: int, kv_blocks: int | None = None, keep_below: int = 0):
+        """(P1K_DEVRESET) reset_slot_users + vfy_zero_user as one zero-fill program (prefill/rz.py); the caller syncs."""
+        from models.demos.blackhole.qwen38_2x262k.prefill.rz import RzWr
+
+        cards = self.reset_items(u, kv_blocks, keep_below)
+        if getattr(self, "_rz", None) is None:
+            self._rz, seen = RzWr(self.mesh), set()
+            for it in cards[u]:  # the page sizes the items assume == the buffers' (checked once per tensor)
+                if id(it[0]) not in seen:
+                    seen.add(id(it[0]))
+                    assert it[0].buffer_page_size() == it[1], (it[0].buffer_page_size(), it[1])
+        io, ids = [], set()
+        for c in cards:
+            for it in c:
+                if id(it[0]) not in ids:
+                    ids.add(id(it[0]))
+                    io.append(it[0])
+        self._rz.run([[(it[0].buffer_address(),) + it[1:] for it in c] for c in cards], io)
+
     def reset_slot_users(self, u: int, kv_blocks: int | None = None, keep_below: int = 0):
         """The verify layout's reset: reset_slot's user-indexed QSA rows only (KV / index pool pages on every card, mirror,
         raw ring, ixout): the verify layout keeps a user's GDN state in its src slot (not slot u) and its histories in
@@ -684,20 +757,8 @@ class StepModel:
 
             for t_ in lay.ring:
                 keep.append(self._rmw_cards(t_, zr, ttnn.bfloat16, ttnn.TILE_LAYOUT))
-        kvb = self.npu if kv_blocks is None else min(self.npu, max(0, kv_blocks))
-        kvb = min(kvb, self.sblocks[u])  # a parked slot of the long mode owns no blocks
-        # in chunks of 64 blocks (one cached zero host tensor per pool kind, not one per high-water size)
-        CH = 64
-        kvb = min(self.npu, -(-kvb // CH) * CH)
         mir_pages = 8 * 16 * qa.MIR_S
-        assert keep_below == 0 or (keep_below % 512 == 0 and keep_below >= 8 * 32 * qa.MIR_S), keep_below
-        b0 = keep_below // 64
-        pieces = []  # (first block, blocks): from b0 up to the next multiple of CH, then CH-block pieces (<= 8 sizes)
-        c0 = b0
-        while c0 < kvb:
-            n_ = min(CH - c0 % CH, kvb - c0)
-            pieces.append((c0, n_))
-            c0 += n_
+        pieces = self._reset_pieces(u, kv_blocks, keep_below)
         for lay in self.qlays:
             t = lay.t
             for c0, n_ in pieces:
@@ -834,8 +895,11 @@ class StepModel:
         from models.demos.blackhole.qwen38_2x262k.ple import device as pdv
 
         st_bytes = gf.HEADS * (gf.HEAD_DIM // 32) ** 2 * 4096
+        c8r = c8.region_bytes(c8.user_regions(u))  # the conv8 layout from driver/conv8.py
         for lay in self.glays:
-            self._zero_region(lay.conv8, 8 * u * H * 2, 8 * H * 2)
+            for lo, hi in c8r:
+                assert lo % c8.PAGE == 0 and hi % c8.PAGE == 0, "region writes are whole pages"
+                self._zero_region(lay.conv8, lo, hi - lo)
             if state_slot is not None:
                 self._zero_region(lay.state, state_slot * st_bytes, st_bytes)
         rb = len(pdv.E_CORES) * 512
@@ -862,11 +926,18 @@ class StepModel:
                 per_ring[j] = per_ring[j]
 
             def fn(c, x, lay=lay, per_ring=per_ring):
-                v = x.view(torch.int16).reshape(32, H)
+                v = x.view(torch.int16)
                 for i in range(3):
                     q = p - 3 + i
                     if q >= 0:
-                        v[8 * u + q % 8] = per_ring[(g - 3 + i) % 4][c][slot]
+                        row = per_ring[(g - 3 + i) % 4][c][slot]
+                        pb, ps, ob, os_ = c8.rec(u, q % 8)
+                        if (
+                            ps == 0 and ob == 0 and os_ == c8.REC
+                        ):  # the record row is one page: plain row write
+                            v.view(-1, c8.PAGE // 2)[pb] = row
+                        else:
+                            c8.put_records(v, u, q % 8, row)
 
             self._rmw_cards_raw(lay.conv8, fn)
 
@@ -883,6 +954,32 @@ class StepModel:
                 v[u * pdv.RING16 + q % pdv.RING16] = rec16(row.contiguous().view(torch.int16)).reshape(-1)
 
         self._rmw_cards_raw(self.ple.ring16, fn)
+
+    def vfy_put_ring16_rows(self, u, recs):
+        """(P1K_R16) vfy_put_ring16 without the read: the rows of recs ({position: [10240] bf16}) as region writes of replicated
+        host rows, one per run of consecutive ring16 rows (positions L - 10 .. L - 2 -> rows 16 u + q % 16: <= 2 runs).  The
+        other rows are not written (the read-modify-write rewrote them with the bytes it had just read).  Returns the host
+        tensors (the caller keeps them until a later blocking read: the writes may still be pending)."""
+        from models.demos.blackhole.qwen38_2x262k.ple import device as pdv
+
+        rb = len(pdv.E_CORES) * 512  # bytes per ring16 row
+        rows = sorted((u * pdv.RING16 + q % pdv.RING16, q) for q in recs)
+        assert len({r for r, _ in rows}) == len(rows), "two positions on one ring16 row"
+        runs = []
+        for r, q in rows:
+            if runs and r == runs[-1][0] + len(runs[-1][1]):
+                runs[-1][1].append(q)
+            else:
+                runs.append((r, [q]))
+        keep = []
+        for r0, qs in runs:
+            img = torch.stack([rec16(recs[q].contiguous().view(torch.int16)).reshape(-1) for q in qs]).reshape(-1)
+            h = ttnn.from_torch(
+                img.view(torch.int32).view(1, -1), dtype=ttnn.int32, layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=self.rep
+            )
+            ttnn.copy_host_to_device_tensor_region(h, self.ple.ring16, r0 * rb, raw_bytes=True)
+            keep.append(h)
+        return keep
 
     def _rmw_cards_raw(self, t_, fn):
         """Every card's copy of t_ as raw bytes (int32 words, flattened), fn(card, words) in place, written back per card."""

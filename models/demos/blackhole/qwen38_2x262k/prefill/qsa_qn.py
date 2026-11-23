@@ -101,9 +101,11 @@ class QsaQN:
         self._p[key] = mpd
         return mpd
 
-    def _wrt(self, outs, st, cores, U, *, u, d, p0, V, pt_row, ip2=None, r8=None):
+    def _wrt(self, outs, st, cores, U, *, u, d, p0, V, pt_row, ip2=None, r8=None, nokc=False):
         """the writer's runtime args of card d (cores / units of card d): the only part of the program that depends on p0 /
-        V / pt_row / u (PS4_HOST item "qn" writes them into a cached descriptor; _desc builds with them)."""
+        V / pt_row / u (PS4_HOST item "qn" writes them into a cached descriptor; _desc builds with them).
+        nokc (PF_NOKC, no key copy): the pooled-key page of EVERY card is user u's ipool page (page-table entry, as the
+        owner card's) and arg 24 = 0 (one write); the ring token list and arg 27 stay owner-only as before."""
         QH, KH, IQ = outs
         KV, MIR, IP, RING = st
         owner = d == u
@@ -124,8 +126,8 @@ class QsaQN:
                     w += [page, nv]
             elif role == ROLE_PK:
                 nk = min(16, max(0, V // 4 - 16 * a))
-                page = (int(pt_row[p0 // 64 + a]) if owner else p0 // 64 + a) if nk else 0
-                assert not (nk and owner) or page != 0
+                page = (int(pt_row[p0 // 64 + a]) if (owner or nokc) else p0 // 64 + a) if nk else 0
+                assert not (nk and (owner or nokc)) or page != 0
                 ring = []
                 if owner or r8 is not None:  # (MTP3_IPALL with the 8-slot ring: the token list on every card)
                     for tc in range(V - min(4, V), V):
@@ -134,7 +136,10 @@ class QsaQN:
                 w += [nk, page, u, len(ring) // 2] + ring
                 if ip2 is not None:  # MTP3_IPALL: args 24 (decode ipool entry + 1 on non-owner cards), 25 (its address)
                     w += [0] * (24 - len(w))
-                    w += [(int(pt_row[p0 // 64 + a]) + 1) if (nk and not owner) else 0, ip2.buffer_address()]
+                    w += [
+                        (int(pt_row[p0 // 64 + a]) + 1) if (nk and not owner and not nokc) else 0,
+                        ip2.buffer_address(),
+                    ]
                     if r8 is not None:  # args 26 (ring8 address), 27 (owner: the 4-slot ring row u)
                         w += [r8.buffer_address(), int(owner)]
             assert len(w) <= 29
@@ -142,7 +147,7 @@ class QsaQN:
             # without the runtime args and asserts equal arg counts per core across cached programs
         return wrt
 
-    def _desc(self, ins, outs, st, *, u, d, p0, V, pt_row, ip2=None, r8=None):
+    def _desc(self, ins, outs, st, *, u, d, p0, V, pt_row, ip2=None, r8=None, nokc=False):
         """the program descriptor of card d (unit form: the same descriptor on every device)."""
         P, GM, CS, CT = ins
         QH, KH, IQ = outs
@@ -150,6 +155,7 @@ class QsaQN:
         ks = ("static", d, u) + tuple(t.buffer_address() for t in (*ins, *outs, *st))
         ks += (("ip2", ip2.buffer_address()),) if ip2 is not None else ()
         ks += (("r8", r8.buffer_address()),) if r8 is not None else ()
+        ks += (("nokc",),) if nokc else ()
         stc = self._p.get(ks) if qsa_dekey() else None  # QSA_DEKEY: reader / compute / CBs are p0-free
         if stc is None:
             grid = self.mesh.compute_with_storage_grid_size()
@@ -164,7 +170,7 @@ class QsaQN:
                 rrt.append((c, [role, P.buffer_address(), GM.buffer_address(), CS.buffer_address(), CT.buffer_address(), a,
                                 b, heads]))  # fmt: skip
                 crt.append((c, [role, heads]))
-        wrt = self._wrt(outs, st, cores, U, u=u, d=d, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8)
+        wrt = self._wrt(outs, st, cores, U, u=u, d=d, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8, nokc=nokc)
         if stc is None:
             rd = fp.reader_kernel(_KDIR + "qn_rd.cpp", cs, sum((fp.accessor_args(t) for t in ins), []), rrt)
             cp = fp.compute_kernel(_KDIR + "qn_cp.cpp", cs, [], crt, fidelity=ttnn.MathFidelity.HiFi4, fp32_dest=True,
@@ -201,16 +207,20 @@ class QsaQN:
     def run_ring(self, ins, outs, st, kc, *, u, p0, V, pt_row, ring8=None):
         """Ring form (QSA_RING): one program per device, d = the device's index in the (4, 1) mesh;
         st = (KV pool, mirror, ipool, ring); card u writes the ipool, every other card the key copy kc (both in the io
-        list).  Card d's program == the unit form's descriptor for d (same _desc)."""
+        list).  Card d's program == the unit form's descriptor for d (same _desc).
+        kc None (PF_NOKC, needs MTP3_IPALL): no key copy, every card writes user u's ipool pages (_wrt nokc)."""
         KV, MIR, IPOOL, RING = st
+        assert kc is not None or ipall(), "no key copy (PF_NOKC) needs MTP3_IPALL=1"
         if ps4("qn"):  # PS4_HOST item "qn": one cached descriptor per (tensor set, u); the writer's args written per call
             return self._run_ring_dk(ins, outs, st, kc, u=u, p0=p0, V=V, pt_row=pt_row, ring8=ring8)
         ip2 = IPOOL if ipall() else None
         r8 = ring8 if ip2 is not None else None  # MTP3_IPALL + the decode 8-slot ring (MTP3_VFY): ring8 on every card
+        nokc = kc is None
         key = (
             ("ring",)
-            + tuple(t.buffer_address() for t in (*ins, *outs, *st, kc))
+            + tuple(t.buffer_address() for t in (*ins, *outs, *st) + (() if nokc else (kc,)))
             + (u, p0, V, tuple(pt_row), ip2 is not None, r8 is not None)
+            + (("nokc",) if nokc else ())
         )
         if qsa_dekey():  # no per-p0 descriptor cache; the static parts come from _desc's cache
             self._p.pop(("ring_last",), None)
@@ -225,7 +235,7 @@ class QsaQN:
                     mpd[ttnn.MeshCoordinateRange(cc, cc)] = self._desc(
                         ins,
                         outs,
-                        (KV, MIR, IPOOL if d == u else kc, RING),
+                        (KV, MIR, IPOOL if (d == u or nokc) else kc, RING),
                         u=u,
                         d=d,
                         p0=p0,
@@ -233,14 +243,21 @@ class QsaQN:
                         pt_row=pt_row,
                         ip2=ip2,
                         r8=r8,
+                        nokc=nokc,
                     )
             self._p[key] = mpd
         ttnn.generic_op(
-            list(ins) + list(outs) + [KV, MIR, IPOOL, kc, RING] + ([r8] if r8 is not None else []), self._p[key]
+            list(ins)
+            + list(outs)
+            + [KV, MIR, IPOOL]
+            + ([] if nokc else [kc])
+            + [RING]
+            + ([r8] if r8 is not None else []),
+            self._p[key],
         )
         return outs
 
-    def _ring_mpd(self, ins, outs, sts, *, u, p0, V, pt_row, ip2=None, r8=None):
+    def _ring_mpd(self, ins, outs, sts, *, u, p0, V, pt_row, ip2=None, r8=None, nokc=False):
         mpd = ttnn.MeshProgramDescriptor()
         rows, cols = self.mesh.shape
         for r in range(rows):
@@ -248,7 +265,7 @@ class QsaQN:
                 d = r * cols + e
                 cc = ttnn.MeshCoordinate(r, e)
                 mpd[ttnn.MeshCoordinateRange(cc, cc)] = self._desc(
-                    ins, outs, sts[d], u=u, d=d, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8
+                    ins, outs, sts[d], u=u, d=d, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8, nokc=nokc
                 )
         return mpd
 
@@ -260,18 +277,20 @@ class QsaQN:
         KV, MIR, IPOOL, RING = st
         rows, cols = self.mesh.shape
         n = rows * cols
-        sts = [(KV, MIR, IPOOL if d == u else kc, RING) for d in range(n)]
+        nokc = kc is None
+        sts = [(KV, MIR, IPOOL if (d == u or nokc) else kc, RING) for d in range(n)]
         ip2 = IPOOL if ipall() else None
         r8 = ring8 if ip2 is not None else None
         key = (
             ("ps4dk",)
-            + tuple(t.buffer_address() for t in (*ins, *outs, *st, kc))
+            + tuple(t.buffer_address() for t in (*ins, *outs, *st) + (() if nokc else (kc,)))
             + (u, ip2 is not None, r8 is not None)
+            + (("nokc",) if nokc else ())
         )
         S = self._p.get(key)
         if S is None:
             count("PS4_qn", "build")
-            S = RtSlots(self._ring_mpd(ins, outs, sts, u=u, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8))
+            S = RtSlots(self._ring_mpd(ins, outs, sts, u=u, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8, nokc=nokc))
             assert S.nm == n
             grid = self.mesh.compute_with_storage_grid_size()
             S.cu = []
@@ -284,14 +303,26 @@ class QsaQN:
             count("PS4_qn", "hit")
             for m in range(n):
                 cores, U = S.cu[m]
-                S.assign_m(m, 2, self._wrt(outs, sts[m], cores, U, u=u, d=m, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8))
+                S.assign_m(
+                    m,
+                    2,
+                    self._wrt(outs, sts[m], cores, U, u=u, d=m, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8, nokc=nokc),
+                )
             if ps4_check():
                 ok = sig_equal(
                     desc_sig(S.mpd),
-                    desc_sig(self._ring_mpd(ins, outs, sts, u=u, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8)),
+                    desc_sig(self._ring_mpd(ins, outs, sts, u=u, p0=p0, V=V, pt_row=pt_row, ip2=ip2, r8=r8, nokc=nokc)),
                 )
                 count("PS4_CHECK_qn", "ok" if ok else "bad")
-        ttnn.generic_op(list(ins) + list(outs) + [KV, MIR, IPOOL, kc, RING] + ([r8] if r8 is not None else []), S.mpd)
+        ttnn.generic_op(
+            list(ins)
+            + list(outs)
+            + [KV, MIR, IPOOL]
+            + ([] if nokc else [kc])
+            + [RING]
+            + ([r8] if r8 is not None else []),
+            S.mpd,
+        )
         return outs
 
     def run(self, ins, outs, st, *, u, d, p0, V, pt_row):

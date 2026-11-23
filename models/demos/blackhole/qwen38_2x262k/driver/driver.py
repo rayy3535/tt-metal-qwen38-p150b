@@ -38,6 +38,8 @@ import torch
 import ttnn
 from models.demos.blackhole.qwen38_2x262k import ctx as ctxm
 from models.demos.blackhole.qwen38_2x262k import qsa_layer as ql
+from models.demos.blackhole.qwen38_2x262k.common import p1k
+from models.demos.blackhole.qwen38_2x262k.driver import conv8 as c8
 from models.demos.blackhole.qwen38_2x262k.driver import sampling as smp
 from models.demos.blackhole.qwen38_2x262k.driver import vrow
 from models.demos.blackhole.qwen38_2x262k.driver.model import PARKED, VARIANTS, StepModel
@@ -194,6 +196,8 @@ class StepDriver:
         prefill=None,
     ):
         self.mesh, self.ck, self.log = mesh, ck, log
+        pe = p1k.errors()  # a P1K_* switch outside the MTP mode (or PF_NOKC without MTP3_IPALL) refuses the start
+        assert not pe, f"P1K switches: {pe}"
         self.replay_timeout, self.host_timeout = replay_timeout, host_timeout
         npu = ctxm.LONG_BLOCKS  # the decode page-table rows: 4,096 entries (262,144 tokens)
         self.npu, self.ple_threads = npu, ple_threads
@@ -1027,6 +1031,7 @@ class StepDriver:
         assert (
             QN_.ipall()
         ), "MTP3=1 needs MTP3_IPALL=1 (the prefill writes ipool / ring8 on every card: verify rows score anywhere)"
+        self.log(f"START P1K switches: {p1k.describe()}")
         self._pt_plain = m.pt_image([u if u < ctxm.served_slots() else None for u in range(4)])
         assert torch.equal(m.read_pt(), self._pt_plain), "the device page table is not the plain image at start-up"
         self._pt_host = m.pt.clone()  # (page-table invariant) the per-user host table is never modified
@@ -1097,6 +1102,10 @@ class StepDriver:
 
         assert MTP_DEVTOK == "1" and mtpm.FUSE == "own" and mtpm.DEVTOK, "MTP3 head: MTP_DEVTOK=1 MTP_FUSE=own"
         self.mtp = mt = MtpHead(self.m, self.ck, self.ple.emb, log=self.log, sems=getattr(self, "_mtp_sems", None))
+        if p1k.on(
+            "MTP_V3W"
+        ):  # (MTP_V3W) prebuilt host tensors for the per-pass writes, self-checked against the old path
+            mt.v3_bind()
         assert (
             "ring8" in mt.t and mt.t["pt"] is self.m.qsh["pt"]
         ), "the MTP QSA reads decode's device page table + ring8"
@@ -1189,11 +1198,16 @@ class StepDriver:
         s = self.slots[u]
         m = self.m
 
+        dev = p1k.on("P1K_DEVRESET")  # one zero-fill program over the same bytes (StepModel.reset_items)
+
         def go():
             t0 = time.perf_counter()
             kvb = (s.hwm + 63) // 64 + 1
-            m.reset_slot_users(u, kv_blocks=kvb, keep_below=keep_below)
-            m.vfy_zero_user(u)
+            if dev:
+                m.reset_dev(u, kv_blocks=kvb, keep_below=keep_below)
+            else:
+                m.reset_slot_users(u, kv_blocks=kvb, keep_below=keep_below)
+                m.vfy_zero_user(u)
             ttnn.synchronize_device(self.mesh)
             return time.perf_counter() - t0
 
@@ -1212,14 +1226,24 @@ class StepDriver:
         """
         ch, m, g = self.chain, self.m, self.g
         w = self._v_slot_for(u)
+        p = L - 1
+        seed = p1k.on("P1K_SEED")  # the conv8 seed inside the commit program, no host read-modify-write
+        rec = c8.seed_args(u, p) if seed else None
         for lay in ch.L:
             if lay.kind == "G":
-                lay.A.stage.commit(m.L[lay.i].state, m.L[lay.i].ring, w, g % 4)
-        ttnn.synchronize_device(self.mesh)
-        p = L - 1
-        m.vfy_seed_conv8(u, w, g, p)
+                if seed:
+                    lay.A.stage.commit_v(m.L[lay.i].state, m.L[lay.i].ring, w, g % 4, m.L[lay.i].conv8, rec)
+                else:
+                    lay.A.stage.commit(m.L[lay.i].state, m.L[lay.i].ring, w, g % 4)
+        if not seed:
+            ttnn.synchronize_device(self.mesh)
+            m.vfy_seed_conv8(u, w, g, p)
         rows = ch.pled.hist_rows() if ch.pled is not None else ch.ple.hist.clone()
-        m.vfy_put_ring16(u, {L - 10 + r: rows[r] for r in range(9) if L - 10 + r >= 0})
+        recs = {L - 10 + r: rows[r] for r in range(9) if L - 10 + r >= 0}
+        if p1k.on("P1K_R16"):  # <= 2 region writes, no read; host tensors kept until the next commit
+            self._r16_keep = m.vfy_put_ring16_rows(u, recs)
+        else:
+            m.vfy_put_ring16(u, recs)
         self.v_src[u], self.v_drafts[u] = w, []
         self._v_check_pt()  # (page-table invariant) after a prefill: its device tables (built lazily) vs the decode table
 

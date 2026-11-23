@@ -20,6 +20,7 @@ import torch
 
 import ttnn
 from models.demos.blackhole.qwen38_2x262k import ctx as ctxm
+from models.demos.blackhole.qwen38_2x262k.common import p1k
 from models.demos.blackhole.qwen38_2x262k.common import program as fp
 from models.demos.blackhole.qwen38_2x262k.prefill import gr_tp
 from models.demos.blackhole.qwen38_2x262k.prefill import qsa_ix as X
@@ -171,7 +172,7 @@ class IxGlue:
             return n0, min(grid.x * grid.y - n0, nrt)
         return 4, min(32, nrt)
 
-    def _rts(self, IQ, SRC, PT, outs, d, u, p0, V, nblk, cores):
+    def _rts(self, IQ, SRC, PT, outs, d, u, p0, V, nblk, cores, nokc=False):
         IQ4, MQ, IQT, NBK, K, MK, KT = outs
         nrt = K.padded_shape[-2] // 32
         n0, nk = self._ncores(K)
@@ -189,7 +190,8 @@ class IxGlue:
                 rts.append((cores[j * qn + q], a + [0] * (11 - len(a))))
         r0 = 0
         for i in range(nk):
-            a = [1] + [t.buffer_address() for t in (SRC, K, MK, KT, PT)] + [int(d == u), u, r0, per[i], nblk]
+            # owner flag: page-table reads (ipool[u]); PF_NOKC (no key copy): on every card
+            a = [1] + [t.buffer_address() for t in (SRC, K, MK, KT, PT)] + [int(d == u or nokc), u, r0, per[i], nblk]
             rts.append((cores[n0 + i], a))
             r0 += per[i]
         return rts
@@ -199,17 +201,22 @@ class IxGlue:
         n0, nk = self._ncores(K)
         return [ttnn.CoreCoord(i % grid.x, i // grid.x) for i in range(n0 + nk)]
 
-    def _desc(self, IQ, SRC, PT, outs, d, u, p0, V, nblk):
+    def _desc(self, IQ, SRC, PT, outs, d, u, p0, V, nblk, nokc=False):
         IQ4, MQ, IQT, NBK, K, MK, KT = outs
         cores = self._cores(K)
         cs = ttnn.CoreRangeSet([ttnn.CoreRange(c, c) for c in cores])
-        rts = self._rts(IQ, SRC, PT, outs, d, u, p0, V, nblk, cores)
+        rts = self._rts(IQ, SRC, PT, outs, d, u, p0, V, nblk, cores, nokc=nokc)
         ct = sum((fp.accessor_args(t) for t in (IQ, IQ4, MQ, IQT, NBK, SRC, K, MK, KT, PT)), [])
         dfs = A.pt_defs(PT) + ([("IXG2", "1"), ("IXG2_Q", str(GLUE2_Q))] if self.g2 else [])
         k = fp.reader_kernel(_KDIR + "ixg_rd.cpp", cs, ct, rts, defines=dfs)
         return fp.program_descriptor([k], [fp.cb_descriptor(0, ttnn.uint32, 70 * 1024, 1, cs)])
 
     def run(self, IQ, IPOOL, KC, PT, outs, *, u, p0, V, nblk, d=None):
+        """KC None (PF_NOKC): no key copy, every card reads user u's ipool pages through the page table (owner form)."""
+        nokc = KC is None
+        io = [IQ, IPOOL] + ([] if nokc else [KC]) + [PT] + list(outs)
+        kca = () if nokc else (KC,)
+        own = lambda x: x == u or nokc  # noqa: E731
         if flag(
             "PF_DK_IXG"
         ):  # PF_DK_IXG: one descriptor per (tensor set, card roles' accessor args); per call p0 / V (glue
@@ -217,32 +224,43 @@ class IxGlue:
             rows, cols = self.mesh.shape
             n = rows * cols
             dd = [(i if d is None else d) for i in range(n)]
-            ct = tuple(tuple(fp.accessor_args(IPOOL if x == u else KC)) for x in dd)
+            ct = tuple(tuple(fp.accessor_args(IPOOL if own(x) else KC)) for x in dd)
             # + K's key rows: with the QIX_SHARED pool's budget a deallocated set may be followed by another size at the same addresses
-            key = ("dk",) + tuple(t.buffer_address() for t in (IQ, IPOOL, KC, PT, *outs)) + (d, A.pt_w(PT), ct, self.g2,
+            key = ("dk",) + tuple(t.buffer_address() for t in (IQ, IPOOL, *kca, PT, *outs)) + (d, A.pt_w(PT), ct, self.g2,
                                                                                          outs[4].padded_shape[-2])  # fmt: skip
+            key += ("nokc",) if nokc else ()
             S = self._p.get(key)
             count("PF_DK_IXG", "build" if S is None else "hit")
             if S is None:
-                mpd = _mesh_prog(self.mesh, lambda i: self._desc(IQ, IPOOL if dd[i] == u else KC, PT, outs, dd[i], u, p0,
-                                                                 V, nblk))  # fmt: skip
+                mpd = _mesh_prog(self.mesh, lambda i: self._desc(IQ, IPOOL if own(dd[i]) else KC, PT, outs, dd[i], u, p0,
+                                                                 V, nblk, nokc))  # fmt: skip
                 S = self._p[key] = RtSlots(seal(mpd))
                 S.cores = self._cores(outs[4])
             else:
                 for m, x in enumerate(dd):
-                    S.assign_m(m, 0, self._rts(IQ, IPOOL if x == u else KC, PT, outs, x, u, p0, V, nblk, S.cores))
-            ttnn.generic_op([IQ, IPOOL, KC, PT] + list(outs), S.mpd)
+                    S.assign_m(m, 0, self._rts(IQ, IPOOL if own(x) else KC, PT, outs, x, u, p0, V, nblk, S.cores, nokc))
+            ttnn.generic_op(io, S.mpd)
             return outs
-        key = tuple(t.buffer_address() for t in (IQ, IPOOL, KC, PT, *outs)) + (u, p0, V, nblk, d, A.pt_w(PT), self.g2,
+        key = tuple(t.buffer_address() for t in (IQ, IPOOL, *kca, PT, *outs)) + (u, p0, V, nblk, d, A.pt_w(PT), self.g2,
                                                                                 outs[4].padded_shape[-2])  # fmt: skip
+        key += ("nokc",) if nokc else ()
         if key not in self._p:
             self._p[key] = _mesh_prog(
                 self.mesh,
                 lambda i: self._desc(
-                    IQ, IPOOL if (i if d is None else d) == u else KC, PT, outs, i if d is None else d, u, p0, V, nblk
+                    IQ,
+                    IPOOL if own(i if d is None else d) else KC,
+                    PT,
+                    outs,
+                    i if d is None else d,
+                    u,
+                    p0,
+                    V,
+                    nblk,
+                    nokc,
                 ),
             )
-        ttnn.generic_op([IQ, IPOOL, KC, PT] + list(outs), self._p[key])
+        ttnn.generic_op(io, self._p[key])
         return outs
 
 
@@ -328,7 +346,11 @@ class QsaRing:
         if state is not None:
             assert state_init is None and set(state) - {"ring8"} == {"kv", "mir", "ip", "ring"}
             self.st = dict(state)
-            self.st["kc"] = th(torch.zeros(*shapes["kc"], dtype=BF), lay=ttnn.ROW_MAJOR_LAYOUT)
+            if p1k.on("PF_NOKC"):  # no key copy: every card writes / reads user u's ipool pages
+                assert N.ipall(), "PF_NOKC=1 needs MTP3_IPALL=1"
+                self.st["kc"] = None
+            else:
+                self.st["kc"] = th(torch.zeros(*shapes["kc"], dtype=BF), lay=ttnn.ROW_MAJOR_LAYOUT)
         else:
             init = state_init or {k: torch.zeros(*s, dtype=BF) for k, s in shapes.items()}
             self.st = {k: th(init[k], lay=ttnn.ROW_MAJOR_LAYOUT) for k in shapes}

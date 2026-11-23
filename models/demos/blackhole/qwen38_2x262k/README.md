@@ -27,7 +27,7 @@ This package was written by AI coding agents (Anthropic's Claude, in Claude Code
 | `serve/` | the HTTP server, chat protocol, GSM8K benchmark client and acceptance replay |
 | `ctx.py` | the context mode (`QWEN38_CTX`): 2 slots x 262K, the only mode |
 | `ref/` | Qwen3.8 CPU oracle and checkpoint loader (pure torch) |
-| `common/` | `program.py` (thin `ttnn.generic_op` layer; `fp.kernel_source(name, file)` = `qwen38_2x262k/<name>/kernels/<file>`), CB placement replica and start-up check, NoC probe kernel, SFPU helper headers, `shuffle_tensor_tiles` |
+| `common/` | `p1k.py` (the MTP-mode switches), `program.py` (thin `ttnn.generic_op` layer; `fp.kernel_source(name, file)` = `qwen38_2x262k/<name>/kernels/<file>`), CB placement replica and start-up check, NoC probe kernel, SFPU helper headers, `shuffle_tensor_tiles` |
 | `kernels/common/` | unified kernel headers (op API, utils, all-gather, DRAM streaming matmul, kernel-end barriers) |
 | `ccl/` | minimal ring all-gather op + kernel, unified kernel descriptor, fabric router config |
 | `gr_rep/` | replicated-residual gated-residual read |

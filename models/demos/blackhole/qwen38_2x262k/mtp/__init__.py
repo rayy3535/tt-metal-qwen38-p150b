@@ -507,9 +507,107 @@ class MtpHead:
     # a_u -> record 0, e_in row sel_u, the next position row keeps rows sel_u at position + 1) and k - 1 chain rows on row sel_u
     # (fusion of xm row sel_u + e_in row sel_u), each followed by the merge (record j).  No ring save / restore: the 8-slot ring
     # never overwrites a committed slot of the open block.  One trace per (QSA variant, k).
+    def v3_bind(self):
+        """(MTP_V3W) prebuilt host tensors for v3_write: an int32 ROW_MAJOR host tensor over a persistent pin buffer and one
+        over a numpy tile image of e_in ([80 tiles, 4 faces, 16, 16] bf16: rows 0..3 of faces 0 / 1 carry data, the rest stays
+        zero; StepModel.pack_xs's scheme without the branch repeat).  Only if the model's pin alias probe passed.  Start-up
+        self-check: the same (rows, tokens, sel) through the old and the new path, every card's pin / e_in bytes compared
+        ("V3W CHECK equal <bool>"); False -> the old path stays.  V3W_CHECK=N repeats the compare on the first N live passes.
+        """
+        import numpy as np
+
+        self._v3 = None
+        if not getattr(self.sm, "_pin_alias", False):
+            self.log("V3W: the pin alias probe did not pass (or did not run); v3_write keeps the from_torch path")
+            return False
+        rep = self.sm.rep
+        pin = torch.zeros(ph_.PIN_WORDS, dtype=torch.int32)
+        hp = ttnn.from_torch(pin.view(1, 1, 1, -1), dtype=ttnn.int32, layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=rep)
+        img = np.zeros((H // 32, 4, 16, 16), dtype=np.int16)  # e_in [32 rows (4 used), 2560] bf16 as 80 tiles
+        he = ttnn.from_torch(
+            torch.from_numpy(img.reshape(-1).view(np.int32)).view(1, -1),
+            dtype=ttnn.int32,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            mesh_mapper=rep,
+        )
+        v3 = SimpleNamespace(pin=pin, hp=hp, img=img, dst=img[:, 0:2, 0:4, :], he=he)
+        self._v3_live = int(os.environ.get("V3W_CHECK", "0"))
+        self._v3_live_bad = self._v3_live_n = 0
+        rows, toks, sel = [(0, 5), (1, 9), None, (0, 6)], [11, 22, -1, 33], {0: 3, 1: 1}
+        self._v3 = None
+        self.v3_write(rows, toks, sel, 7)
+        a = self._v3_read()
+        self._v3 = v3
+        self._v3_new(rows, toks, sel, 7)
+        b = self._v3_read()
+        ok = a == b
+        self.log(
+            f"V3W CHECK equal {ok} (start-up: pin + e_in bytes, {len(a[0])} cards; live checks V3W_CHECK={self._v3_live})"
+        )
+        if not ok:
+            self._v3 = None
+        return ok
+
+    def _v3_read(self):
+        """(V3W checks) every card's pin and e_in as raw bytes (padded rows included where the tensor has them)."""
+
+        def rd(t):
+            out = []
+            for d_ in ttnn.get_device_tensors(t):
+                h = ttnn.from_device(d_)
+                try:
+                    x = h.to_torch_with_padded_shape()
+                except Exception:  # noqa: BLE001
+                    x = ttnn.to_torch(h)
+                if x.dtype == torch.bfloat16:
+                    x = x.view(torch.int16)
+                out.append(x.contiguous().numpy().tobytes())
+            return out
+
+        ttnn.synchronize_device(self.mesh)
+        return rd(self.pin), rd(self.e_in)
+
+    def _v3_new(self, rows, tokens, sel, counter):
+        """(MTP_V3W) the same pin words and e_in rows as the old path, through the prebuilt host tensors: 2 raw region writes of
+        the whole pages, no allocation.  The buffers are refilled by the next pass; every caller has a blocking read or a sync
+        between two passes (the draft records read, start-up _sync, the checks' reads), so a refill never meets a pending write
+        even if the write reads the host buffer late (whether it copies at the call is not verified)."""
+        v3 = self._v3
+        w = v3.pin
+        w.zero_()
+        pos = [x[1] if x is not None else -1 for x in rows]
+        w[: ph_.STEP_WORDS] = torch.tensor(ph_.header(counter, pos), dtype=torch.int32)
+        for r, x in enumerate(rows):
+            w[4 + r] = 0 if x is None else x[0] + 1
+        for u in range(2):
+            w[20 + u] = sel.get(u, -1)
+        ttnn.copy_host_to_device_tensor_region(v3.hp, self.pin, 0, raw_bytes=True)
+        tok = torch.tensor([t if t >= 0 else 0 for t in tokens], dtype=torch.long)
+        e = self.emb.index_select(0, tok)
+        v3.dst[...] = e.contiguous().view(torch.int16).numpy().reshape(B, H // 32, 2, 16).transpose(1, 2, 0, 3)
+        ttnn.copy_host_to_device_tensor_region(v3.he, self.e_in, 0, raw_bytes=True)
+
+    def _v3_live_check(self, rows, tokens, sel, counter):
+        """(V3W_CHECK) old path, read back, new path, read back, compare (checks only: blocking reads)."""
+        v3, self._v3 = self._v3, None
+        self.v3_write(rows, tokens, sel, counter)
+        a = self._v3_read()
+        self._v3 = v3
+        self._v3_new(rows, tokens, sel, counter)
+        eq = a == self._v3_read()
+        self._v3_live_n += 1
+        self._v3_live_bad += not eq
+        if not eq or self._v3_live_n == self._v3_live:
+            self.log(f"V3W CHECK live {self._v3_live_n - self._v3_live_bad} / {self._v3_live_n} equal")
+
     def v3_write(self, rows, tokens, sel, counter):
         """rows: 4 entries (user, position) or None; tokens: 4 ids (row r's e_in token); sel: {user: row} (users 0 / 1);
-        counter: the pin's step word (the MTP tprev slot tag)."""
+        counter: the pin's step word (the MTP tprev slot tag).  (MTP_V3W, after v3_bind) the prebuilt-tensor path.
+        """
+        if getattr(self, "_v3", None) is not None:
+            if self._v3_live_n < self._v3_live:
+                return self._v3_live_check(rows, tokens, sel, counter)
+            return self._v3_new(rows, tokens, sel, counter)
         w = torch.zeros(ph_.PIN_WORDS, dtype=torch.int32)
         pos = [x[1] if x is not None else -1 for x in rows]
         w[: ph_.STEP_WORDS] = torch.tensor(ph_.header(counter, pos), dtype=torch.int32)

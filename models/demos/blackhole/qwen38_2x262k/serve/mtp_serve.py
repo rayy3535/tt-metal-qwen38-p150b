@@ -36,7 +36,12 @@ from models.demos.blackhole.qwen38_2x262k.serve import server as sv
 
 # the env the driver's verify mode needs (server.main sets it before any driver / prefill / mtp import; a conflicting explicit
 # value refuses the start)
-MTP_ENV = {"MTP3": "1", "MTP3_VFY": "1", "MTP3_IPALL": "1", "MTP_DEVTOK": "1", "MTP_FUSE": "own", "MTP_PF": "1"}
+MTP_ENV = {"MTP3": "1", "MTP3_VFY": "1", "MTP3_IPALL": "1", "MTP_DEVTOK": "1", "MTP_FUSE": "own", "MTP_PF": "1",
+           # the five switches below: the verify commit's device seed + ring16 rows, the prebuilt draft-input writes, the
+           # device slot reset, no prefill key copy.  Each one can be turned off alone by an explicit 0 in the environment
+           # (P1K_SWITCHES: explicit 0 / 1 wins; every other key must match)
+           "P1K_SEED": "1", "P1K_R16": "1", "MTP_V3W": "1", "P1K_DEVRESET": "1", "PF_NOKC": "1"}  # fmt: skip
+P1K_SWITCHES = ("P1K_SEED", "P1K_R16", "MTP_V3W", "P1K_DEVRESET", "PF_NOKC")
 VLOG_KEEP = 1 << 16  # driver.vlog / v_tdraft rows kept (trimmed to this when twice as long)
 DRAM_S = float(os.environ.get("SV_MTP_DRAM_S", "60"))
 PROBE_EVERY = 100  # (dram_probe) prefill sublayers between samples
@@ -51,15 +56,25 @@ def preflight(mtp: str, env, pf_serve: bool):
                 "MTP3=1 is in the environment but --mtp is off: start with --mtp on (the server's MTP mode) or unset MTP3",
                 {},
             )
+        on = [k for k in P1K_SWITCHES if env.get(k, "0") != "0"]
+        if on:
+            return f"--mtp off: {on} are MTP-mode switches (only 0 or unset with --mtp off)", {}
         return None, {}
     if not pf_serve:
         return "--mtp on needs the device prefill (PF_SERVE=1)", {}
     if env.get("MTP_SHADOW", "0") == "1":
         return "--mtp on: MTP_SHADOW=1 (the MTP-2 shadow mode) cannot be combined with the verify step", {}
+    out = dict(MTP_ENV)
     for k, v in MTP_ENV.items():
-        if env.get(k) not in (None, v):
+        if k in P1K_SWITCHES and env.get(k) is not None:
+            if env[k] not in ("0", "1"):
+                return f"--mtp on: {k}={env[k]} (P1K switches take 0 or 1)", {}
+            out[k] = env[k]  # explicit wins: one item off alone
+        elif env.get(k) not in (None, v):
             return f"--mtp on needs {k}={v}; the environment has {k}={env.get(k)}", {}
-    return None, dict(MTP_ENV)
+    if out["PF_NOKC"] == "1" and out["MTP3_IPALL"] != "1":
+        return "--mtp on: PF_NOKC=1 needs MTP3_IPALL=1", {}
+    return None, out
 
 
 def _dram(mesh):
