@@ -4,8 +4,8 @@
 
 - [Accuracy at a glance](#accuracy-at-a-glance)
 - [Performance at a glance](#performance-at-a-glance)
-  - [Measured before the latest change](#measured-before-the-latest-change)
 - [What this repository is](#what-this-repository-is)
+- [Where the weights live and what is quantized](#where-the-weights-live-and-what-is-quantized)
 - [Approach: how this implementation was built, and why](#approach-how-this-implementation-was-built-and-why)
   - [The problem](#the-problem)
   - [Why not compose upstream ttnn ops](#why-not-compose-upstream-ttnn-ops)
@@ -46,8 +46,8 @@ used, are in [Evaluation results](#evaluation-results-accuracy).
 
 ## Performance at a glance
 
-Measured on 4 x Blackhole p150b with an earlier code revision (see [Measured before the latest change](#measured-before-the-latest-change),
-which also lists what the latest change gained): long-context mode, MTP speculative decode on, greedy.
+Measured on 4 x Blackhole p150b with an earlier code revision (outputs bitwise identical on the validation prompts;
+these tables were not re-measured, see [Caveats](#caveats)): long-context mode, MTP speculative decode on, greedy.
 
 | context | prefill, cold: time to first token | prefill throughput | decode, 1 user | decode, 2 users (aggregate) |
 |---|---|---|---|---|
@@ -78,59 +78,11 @@ Notes:
 > additions, the tests, the launcher and this README. The same agents ran every measurement on this page. A human
 > engineer set the goals, reviewed the results and made the decisions. The upstream tt-metal code underneath is upstream's own work.
 
-### Measured before the latest change
-
-The performance, comparison and evaluation numbers on this page were measured on earlier revisions and were not
-re-measured.
-
-**The latest change** moves host work around the MTP verify state to the device (MTP mode only):
-- the prefill's commit into the verify state seeds the GDN conv history inside the device commit program, instead of a
-  host read-modify-write;
-- the verify ring rows of a new prompt are written as at most two region writes, without reading them back first;
-- a slot reset is one device zero-fill program;
-- the MTP draft head's per-pass host inputs are written through pre-built host tensors that alias their buffers,
-  instead of new host tensors on every pass.
-
-Measured on the cards against the previous revision on the same day. The first four rows are one run per revision
-(p50 over 60 resumed turns; the ~119K-token row is a single reset each). The decode, throughput and time-to-first-token
-rows are means of 3 + 3 server runs, and the 32K cold prompt was checked again in a second measurement (2 + 2 runs).
-These runs use their own request sequence, so their absolute values differ from the table at the top; compare the
-two columns with each other only:
-
-| metric | previous revision | this revision |
-|---|---|---|
-| prefill commit of a resumed turn, p50 | 37.6 ms | 3.7 ms |
-| slot reset of a resumed turn, p50 | 7.8 ms | 2.0 ms |
-| slot reset for a new turn after a ~119K-token session | 84 ms | 11 ms |
-| MTP draft-input host writes, p50 per pass | 145 us | 70 us |
-| decode step, 1 or 2 users, 8K-128K | | 0.08-0.11 ms shorter |
-| aggregate throughput on the request sets | | +1.5 % to +4.9 % (GSM8K and Chinese prompt sets); +0.5 % or within run-to-run spread (software-engineering prompt set) |
-| cold time to first token, 8K | 1.88 s | 1.77 s |
-| cold time to first token, 32K | 7.35 s | 7.52 s |
-| cold time to first token, 128K and 250K | | unchanged within run-to-run spread |
-
-- **Cold 32K is slower** by about 0.15-0.2 s (+2-3 %), reproduced in both measurements. It is not attributable to any
-  single one of the four items, and is about the size of the previous revision's own run-to-run spread in the second
-  measurement (0.13 s). It was accepted for the gains above.
-- Server outputs (greedy, MTP on and off) were bitwise identical to the previous revision on the validation prompts.
-- A fifth item, no prefill key copy (`PF_NOKC`), is on by default in MTP mode in the code, but is not yet validated
-  together with the other four. The launcher sets `PF_NOKC=0`, which is the measured configuration.
-
-**The change before that:**
-- removes the 4 x 32K context mode: 2 users x 262,144 tokens is now the only mode;
-- stops allocating prefill scratch tensors that the served code paths never use, which frees 1.32 GB of DRAM per card:
-  free DRAM per card after start-up (MTP on) went from about 0.71 GB to about 2.03 GB;
-- renames the context variable to `QWEN38_CTX`.
-
-On the cards, that change gave bitwise-identical decode and server outputs on the validation prompts, and speed within
-the performance check's threshold, compared with the revision before it. The variable rename itself was checked
-off-card only.
-
 ## What this repository is
 
 - **Base:** upstream [tenstorrent/tt-metal](https://github.com/tenstorrent/tt-metal) at commit
   `d1a102793682817a4c12c572c44e6ad0277b5fe0`. Its history is kept unchanged.
-- **One commit on top** adds the following:
+- **Commits on top** add the following:
   - **`models/demos/blackhole/qwen38_2x262k`:** Qwen3.8-Flash-Next serving two concurrent users, each with the full
     262,144-token context, on four Blackhole p150b cards cabled as a 1D ring. It contains its own decode kernels (one program per layer stage), a device prefill
     with KV-session reuse, MTP speculative decode, and an OpenAI-compatible HTTP server. It depends only on tt-metal
@@ -143,6 +95,58 @@ off-card only.
 
 Upstream tt-metal's own README is at
 [github.com/tenstorrent/tt-metal](https://github.com/tenstorrent/tt-metal/blob/main/README.md).
+
+## Where the weights live and what is quantized
+
+**All model weights are resident in the cards' DRAM**, loaded once at start-up. This includes every routed expert:
+none is paged in from host memory or evicted while serving. Only two embedding tables stay in host RAM. The host
+looks up rows in them and sends those rows as each step's input.
+
+Formats:
+- **BF4 / BF8** are Tenstorrent's block-float formats `BFLOAT4_B` / `BFLOAT8_B`. Every 16 values share one 8-bit
+  exponent, and each value keeps a sign plus a 3-bit (BF4) or 7-bit (BF8) mantissa. These are the only quantized
+  formats used.
+- **BF16** is the checkpoint's own precision.
+- **Fidelity** is the matmul math fidelity of the decode programs (LoFi < HiFi2 < HiFi4). Matmuls accumulate in fp32.
+
+**Weights**
+
+| component | where | format | notes |
+|---|---|---|---|
+| routed experts (48 layers x 512, top-10 per token) | device DRAM, all resident | BF4 | Split over the 4 cards: each card holds a quarter of every expert (160 of 640 intermediate columns), spread evenly over its 8 DRAM banks. About 68 GB (63 GiB) in total, 17 GB (15.8 GiB) per card. Built once from the BF16 checkpoint by `tools/convert_tp4`. LoFi |
+| shared expert and its gate (every layer) | device DRAM | BF8 | a quarter per card; HiFi2 |
+| router | device DRAM | BF16 | HiFi4, fp32 logits; the top-10 selection runs on the device |
+| full-attention layers (12 of 48): q / gate, k, v and output projections, indexer projections | device DRAM | BF8 | projections, attention and indexer scoring at HiFi4 |
+| linear-attention (GDN) layers (36 of 48): input and output projections | device DRAM | BF8 | HiFi2 |
+| GDN convolution taps and gated-norm weight | device DRAM | BF16 | |
+| GDN decay and time-step bias | device DRAM | fp32 | |
+| hyper-connection weights (residual-branch mixing around every sublayer, and the final mixer) | device DRAM | BF8; norm weights BF16 | HiFi4 |
+| attention q / k norms and indexer norms | device DRAM | fp32 | |
+| n-gram embedding (PLE) projections | device DRAM | BF8 | HiFi4 |
+| LM head (vocabulary 248,320) | device DRAM | BF8 | split by vocabulary, 62,080 rows per card; HiFi4, fp32 logits; each card returns its top 20 per user |
+| MTP draft head (one layer) | device DRAM | as the backbone: attention BF8, experts BF4 (their own cache, about 1.4 GB), input fusion BF8 | shares the main LM head; fusion at HiFi4 |
+| token embedding (248,320 x 2,560) | host RAM | BF16 | 1.27 GB. MTP mode also keeps a vocabulary-split BF16 copy on the cards (318 MB per card) for the draft tokens |
+| n-gram embedding table (PLE) | host RAM | BF16 | 102.4 GB (95.4 GiB), read into RAM at start-up. Per step, the host gathers 16 rows per user |
+| vision encoder | not loaded | - | text only; requests with images are refused |
+
+The prefill runs its own programs. They read the same routed-expert tensors as decode, with no second copy. They keep
+their own copies of the other weights in prefill layouts; the attention, GDN and shared-expert projections are BF8
+there too. The fidelity notes above are for decode.
+
+**State and per-step data**
+
+| item | where | format | notes |
+|---|---|---|---|
+| KV cache (12 attention layers + the MTP layer) | device DRAM, allocated at start-up for 2 x 262,144 tokens | BF16 | not quantized. Paged in 64-token blocks; each card holds one KV head (two cards per head). About 0.54 GB per layer per card, about 7 GB per card in total |
+| indexer key pool | device DRAM | BF16 | one pooled key per 4 tokens, 128 wide |
+| GDN recurrent state | device DRAM | fp32 | the state update runs in fp32 |
+| GDN and PLE convolution history | device DRAM | BF16 | |
+| residual stream and activations | device L1 / DRAM | BF16 | 4 residual branches x 2,560. Intermediates stay in on-chip L1 inside a sublayer |
+| session snapshots for resumed turns | device DRAM | fp32 / BF16 | one per served slot, about 0.47 GB per card for both. Saved and restored by copies on the device; the KV cache stays in place. The host keeps the prompt's token ids and the n-gram lookup context |
+| per-step input | host -> cards | BF16 | two writes from pinned host memory: the input residual built from the token embeddings (a 655 KB tile image), and about 20 KB of n-gram rows plus the users' positions. The prefill builds each chunk's input from the host embedding table too |
+| per-step output | cards -> host | fp32 values, int ids | each card's top 20 candidates per user. The host merges them and samples: greedy, or temperature / top-k / top-p |
+
+After start-up with MTP on, about 2.03 GB of DRAM is free per card.
 
 ## Approach: how this implementation was built, and why
 
@@ -349,11 +353,14 @@ prompt on every turn (12 of 12 turns). Ours resumes each session from its saved 
   MTP because FN's admission model refuses it at that size.
 - **Repeats.** n = 2-3 per point. Every "ours faster" verdict has non-overlapping ranges. The agent-load table is
   one run.
-- **Code revision.** Our numbers were measured on an earlier production revision: this code before the
-  two latest changes (see [Measured before the latest change](#measured-before-the-latest-change)) and before the clean-up
-  for publication, plus the two moe_compute kernels. The clean-up:
-  - edits comments, docstrings and log / help text only, apart from neutral default paths;
-  - removes development tests, probes and tools that the server does not import.
+- **Code revision.** Our numbers were measured on an earlier production revision: this code before its two latest
+  changes and before the clean-up for publication, plus the two moe_compute kernels.
+  - **The two latest changes** remove the 4 x 32K mode and unused prefill scratch tensors, and move host work around
+    the MTP verify state to the device. Both gave bitwise-identical server outputs on the validation prompts. The
+    latest one made decode steps 0.08-0.11 ms shorter and cold time to first token at 32K about 2-3 % slower than the
+    revision before it.
+  - **The clean-up** edits comments, docstrings and log / help text only, apart from neutral default paths. It also
+    removes development tests, probes and tools that the server does not import.
 
   Nothing was re-measured on this exact commit.
 
@@ -405,7 +412,7 @@ upstream base. They were **not re-run on this commit**.
 | hugepages | 1 GiB hugepages, as set up by tt-metal's install instructions; the measured host had 16 |
 | host memory | the server refuses to serve if MemAvailable is below 40 GB after start-up (`--min-mem-gb`); our host had 256 GB |
 | Python | 3.12 (`./create_venv.sh --python-version 3.12`) |
-| tt-metal | this repository (upstream base `d1a102793682` + this commit) |
+| tt-metal | this repository (upstream base `d1a102793682` + the commits on top of it) |
 | checkpoint | [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) at revision `f5d08274bafd880402bd16f5e3e6c514136ec06c` (131 shards, ~360 GB); the loader checks the revision and the shard manifest |
 
 ### Build
