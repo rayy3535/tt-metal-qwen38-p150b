@@ -86,7 +86,7 @@ server outputs on the validation prompts:
 - **GDN verify conv-history layout** (one 512 B page per user and tile column, read whole): 2-user decode step -0.31 ms
   (-3.2 %, 4 alternating runs); aggregate 2-user decode +2.3 % to +3.1 % (8K, 32K and 250K documents and two request
   sets; one server run per revision); time to first token unchanged (within 0.2 %).
-- **No prefill key copy** (`PF_NOKC=1`, now set by the launcher): the per-layer indexer key copies and their snapshot
+- **No prefill key copy** (on by default): the per-layer indexer key copies and their snapshot
   copies are gone. DRAM free per card after start-up 1.71 -> 2.33 GB; session snapshots 0.47 -> 0.07 GB per card.
 - **Net:** DRAM free per card after start-up 2.03 GB (previous published revision) -> 2.33 GB.
 
@@ -535,13 +535,7 @@ models/demos/blackhole/qwen38_2x262k/scripts/run_server.sh --print-env     # sho
 | parameter | where | meaning | value used | allowed values |
 |---|---|---|---|---|
 | `QWEN38_CTX` | env | context mode | `262144` | unset or `262144`: 2 slots x 262,144 tokens, the only mode (each request may use up to 262,080 tokens of prompt + `max_tokens`); any other value is refused at start-up. The earlier 4 x 32K mode was removed |
-| `PF_SERVE` | env | device prefill inside the server; `0` feeds prompts through the decode path | `1` | `1` (default), `0` |
-| `MOE_LIVE` | env | the MoE router builds the expert union from live slots only (parked slots get no experts) | `1` | `1` (default), `0` |
-| `P1K_SEED`, `P1K_R16`, `MTP_V3W`, `P1K_DEVRESET` | env | MTP mode only: conv-history seed inside the device commit; verify ring rows without read-back; pre-built draft-input host tensors; device slot reset | unset (on in MTP mode) | unset or `1`: on in MTP mode; `0` turns one off; with MTP off only unset or `0` |
-| `PF_NOKC` | env | MTP mode only: no prefill key copy (every card writes the user's own index-pool pages) | `1` (launcher) | `1` (also the code's MTP-mode default when unset), `0`; `1` needs `MTP3_IPALL=1`, which MTP mode sets. With `--mtp off` start with `PF_NOKC=0` |
-| `VF2_C8` | env | MTP mode only: layout of the GDN verify conv history | unset (`b` in MTP mode) | `b` (one 512 B page per user and tile column, read whole), `a` (same layout, 64 B record reads), `0` (one page per user and history slot); other values are refused |
-| `IXI_F`, `IXI_POOL`, `IXI_INC` | env | device prefill indexer: fused first-stage program; one storage set for all key buckets; incremental key-side state per layer | `1` (launcher, and the server's prefill profile) | `1`, `0`; `IXI_POOL` and `IXI_INC` need `IXI_F=1` |
-| `--mtp` | server flag | MTP speculative decode, decided at start-up | `auto` | `auto` (default: on with `PF_SERVE=1`, else off), `on`, `off` |
+| `--mtp` | server flag | MTP speculative decode, decided at start-up | `auto` | `auto` (default: on), `on`, `off` |
 | `--host` / `--port` | server flags | HTTP bind address | `127.0.0.1` / `8020` | any |
 | `--min-mem-gb` | server flag | refuse to serve if host MemAvailable after start-up is below this | `40` (default) | GB, float |
 | `--checkpoint` | server flag | checkpoint directory | `$QWEN38_CHECKPOINT` | path |

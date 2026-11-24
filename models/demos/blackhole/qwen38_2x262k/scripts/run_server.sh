@@ -39,10 +39,6 @@ export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost
 
 # Serving mode: 2 slots x 262,144-token context, device prefill in the server, live MoE expert path.
 export QWEN38_CTX=262144 PF_SERVE=1 MOE_LIVE=1
-# MTP-mode switches (serve/mtp_serve.py turns all five on in MTP mode; an explicit 0 keeps one off).  PF_NOKC=1 (no
-# prefill key copy) is set explicitly, as in the measured deployment; with --mtp off start with PF_NOKC=0, because the
-# MTP-mode switches are refused outside MTP mode.
-export PF_NOKC=${PF_NOKC:-1}
 # Seconds to retry a busy port at start-up (a restarted server waits for the previous one to release it).
 export B4_SERVE_BIND_RETRY_S=120
 
