@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next for 2 users at full 262K context on 4 x Blackhole p150b
 
-[![Code written by AI](https://img.shields.io/badge/code-written%20by%20AI-8A2BE2)](#written-by-ai)
-[![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)](#written-by-ai)
+[![Code written by AI](models/demos/blackhole/qwen38_2x262k/docs/badges/written-by-ai.svg)](#written-by-ai)
+[![Built with Claude Code](models/demos/blackhole/qwen38_2x262k/docs/badges/built-with-claude-code.svg)](#written-by-ai)
 
 ## Contents
 
