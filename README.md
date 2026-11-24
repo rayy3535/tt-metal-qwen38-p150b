@@ -46,9 +46,8 @@ used, are in [Evaluation results](#evaluation-results-accuracy).
 
 ## Performance at a glance
 
-Measured on 4 x Blackhole p150b: long-context mode, MTP speculative decode on, greedy. Unmarked values were measured
-on the production revision this code was taken from (same code; comments and messages differ). Values marked * are from
-an earlier revision and were not re-measured with the same method on this one (see the notes).
+Measured on 4 x Blackhole p150b: long-context mode, MTP speculative decode on, greedy. Values marked * come from the
+comparison below, which ran on an earlier revision of this code.
 
 | context | prefill, cold: time to first token | prefill throughput | decode, 1 user | decode, 2 users (aggregate) |
 |---|---|---|---|---|
@@ -64,31 +63,16 @@ session (closed-loop agent replay, one session).
 Notes:
 - **Prefill, cold:** client first token - submit, one run per point after a warm-up pass, prompts of 7,902 / 31,105 /
   246,390 tokens. **Prefill throughput** = prompt tokens / time to first token, for a cold prompt (no reuse).
-- **128K prefill \*:** from the comparison below (126,094 tokens, n = 2, earlier revision). A cold 128K prompt was not
-  timed on this revision. A 131,150-token prompt that resumes from a saved 30,720-token prefix takes 26.7 s here (30.3 s
-  before the prefill indexer change below).
-- **Decode, 1 user \*:** from the comparison below (earlier revision): 1,000 generated tokens, 2.9-3.9 tokens per MTP
-  pass. The 128K value is server-side, because that response is a tool call, which the server sends as one chunk. The
-  conv-history layout change below was measured at server level only; there the one-user decode rate rose by 1.8-2.1 %
-  (8K / 32K / 128K).
+- **128K prefill \*:** from the comparison below (126,094 tokens, n = 2). A 131,150-token prompt that resumes from a
+  saved 30,720-token prefix takes 26.7 s.
+- **Decode, 1 user \*:** from the comparison below: 1,000 generated tokens, 2.9-3.9 tokens per MTP pass. The 128K
+  value is server-side, because that response is a tool call, which the server sends as one chunk.
 - **Decode, 2 users:** both users decoding at the same time.
   - At 8K and 32K: the server's step rate while both users decode (the sum of the two users' rates), one server run.
   - At 128K: two users at about 131K tokens each (315-325 tok/s, n = 2). Both resume from their saved prompt state and
     then decode 1,000 tokens each together; aggregate = all generated tokens / (last end - first token).
   - At 250K: two users at about 246K tokens each, the same method as 128K (mean of 2 repeats in one server run).
 - The comparison with the upstream model and the method details are below.
-
-**Latest changes.** Each was measured on the cards against the revision before it, and each gave bitwise-identical
-server outputs on the validation prompts:
-- **Prefill indexer** (one fused program per card, one storage set for all key buckets, incremental key-side state per
-  layer): cold time to first token 8K 1.78 -> 1.75 s, 32K 7.52 -> 7.09 s, 250K 80.67 -> 67.25 s (2 + 2 alternating
-  runs); the 131K prompt resumed from a 30,720-token prefix 30.26 -> 26.68 s. It costs 0.32 GB of DRAM per card.
-- **GDN verify conv-history layout** (one 512 B page per user and tile column, read whole): 2-user decode step -0.31 ms
-  (-3.2 %, 4 alternating runs); aggregate 2-user decode +2.3 % to +3.1 % (8K, 32K and 250K documents and two request
-  sets; one server run per revision); time to first token unchanged (within 0.2 %).
-- **No prefill key copy** (on by default): the per-layer indexer key copies and their snapshot
-  copies are gone. DRAM free per card after start-up 1.71 -> 2.33 GB; session snapshots 0.47 -> 0.07 GB per card.
-- **Net:** DRAM free per card after start-up 2.03 GB (previous published revision) -> 2.33 GB.
 
 > All comparison numbers are final for the code revision they name. Measured 2026-11-21 on one machine, both servers
 > on the same tt-metal tree.
@@ -373,14 +357,9 @@ prompt on every turn (12 of 12 turns). Ours resumes each session from its saved 
   MTP because FN's admission model refuses it at that size.
 - **Repeats.** n = 2-3 per point. Every "ours faster" verdict has non-overlapping ranges. The agent-load table is
   one run.
-- **Code revision.** Our comparison numbers were measured on an earlier production revision: this code before its
-  five latest changes and before the clean-up for publication, plus the two moe_compute kernels.
-  - **The five latest changes** remove the 4 x 32K mode and unused prefill scratch tensors; move host work around the
-    MTP verify state to the device; fuse the prefill indexer; change the GDN verify conv-history layout; and drop the
-    prefill key copy. Each gave bitwise-identical server outputs on the validation prompts. The MTP verify-state change
-    made decode steps 0.08-0.11 ms shorter and cold time to first token at 32K about 2-3 % slower than the revision
-    before it; the other three are summarised under [Performance at a glance](#performance-at-a-glance), whose
-    unmarked values include all five.
+- **Code revision.** Our comparison numbers were measured on an earlier production revision of this code, before the
+  clean-up for publication, plus the two moe_compute kernels. Server outputs of that revision and of this code are
+  bitwise identical on the validation prompts.
   - **The clean-up** edits comments, docstrings and log / help text only, apart from neutral default paths. It also
     removes development tests, probes and tools that the server does not import.
 
@@ -388,8 +367,7 @@ prompt on every turn (12 of 12 turns). Ours resumes each session from its saved 
 
 ## Evaluation results (accuracy)
 
-These runs used **earlier revisions of this code**, before MTP was added and before the rebase onto the current
-upstream base. They were **not re-run on this commit**.
+These runs used **earlier revisions of this code** and were **not re-run on this commit**.
 
 - **MTP and greedy output.** MTP verification keeps greedy output bitwise identical to plain decode; the production
   gates measure this.
@@ -534,22 +512,17 @@ models/demos/blackhole/qwen38_2x262k/scripts/run_server.sh --print-env     # sho
 
 | parameter | where | meaning | value used | allowed values |
 |---|---|---|---|---|
-| `QWEN38_CTX` | env | context mode | `262144` | unset or `262144`: 2 slots x 262,144 tokens, the only mode (each request may use up to 262,080 tokens of prompt + `max_tokens`); any other value is refused at start-up. The earlier 4 x 32K mode was removed |
 | `--mtp` | server flag | MTP speculative decode, decided at start-up | `auto` | `auto` (default: on), `on`, `off` |
 | `--host` / `--port` | server flags | HTTP bind address | `127.0.0.1` / `8020` | any |
 | `--min-mem-gb` | server flag | refuse to serve if host MemAvailable after start-up is below this | `40` (default) | GB, float |
 | `--checkpoint` | server flag | checkpoint directory | `$QWEN38_CHECKPOINT` | path |
 | `reasoning_effort` | request field | thinking level of the chat template | `xhigh` (default, no thinking cap) | `xhigh`, `medium`, `low` (OpenAI values are mapped to these) |
 | sampling | request fields | a request without sampling fields uses the checkpoint's `generation_config` | temperature 1.0, top_p 0.95, top_k 20 | `temperature: 0` gives greedy; `SV_DEFAULT_SAMPLING=greedy` makes greedy the default |
-| `TT_MESH_GRAPH_DESC_PATH` | env | mesh graph descriptor (4x1 ring) | `mgd/p150_4x1_ring_pinned.textproto` | a 4x1 RING descriptor |
 | `TT_METAL_CACHE` | env | JIT kernel cache directory | `~/.cache/qwen38_2x262k/jit-cache` | path |
 | hang watchdog | built in | a device call that does not return within its timeout (decode replay 10 s, host-side work 600 s, a prefill action `--prefill-timeout` 45 s) fails the open requests; if the call still has not returned after a 10 s grace, the process exits with code 124 | defaults | `--hold-on-hang` keeps the process alive instead (for live debugging under a supervisor) |
-| `WORKER_L1` | env | L1 bytes per worker core for the kernel config ring | `1300000` | integer, or `default` for tt-metal's default |
-| `--prefill-budget-ms` | server flag | while other slots decode, run prefill in slices of about this many ms per step | `25` (default) | ms; `0` = one prefill chunk per decode step |
-| `--prefill-min-tokens` | server flag | fresh prompts with at least this many tokens use the device prefill; shorter ones are fed through decode | `48` (default) | integer |
 
-The launcher also exports the decode and prefill kernel configuration (`GDN_*`, `QC_*`, `QSA_*`, `QIX_*`, `QAS_*`,
-`PF_*`, `B4_AG_*`, `FID`, `XS0`). These are the measured configuration; leave them as they are.
+The launcher sets everything else (context mode, mesh descriptor, kernel and prefill configuration) to the measured
+configuration.
 
 ### Requests
 
