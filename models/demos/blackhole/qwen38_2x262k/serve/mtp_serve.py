@@ -40,8 +40,12 @@ MTP_ENV = {"MTP3": "1", "MTP3_VFY": "1", "MTP3_IPALL": "1", "MTP_DEVTOK": "1", "
            # the five switches below: the verify commit's device seed + ring16 rows, the prebuilt draft-input writes, the
            # device slot reset, no prefill key copy.  Each one can be turned off alone by an explicit 0 in the environment
            # (P1K_SWITCHES: explicit 0 / 1 wins; every other key must match)
-           "P1K_SEED": "1", "P1K_R16": "1", "MTP_V3W": "1", "P1K_DEVRESET": "1", "PF_NOKC": "1"}  # fmt: skip
+           "P1K_SEED": "1", "P1K_R16": "1", "MTP_V3W": "1", "P1K_DEVRESET": "1", "PF_NOKC": "1",
+           # driver/conv8.py: the GDN verify history conv8 in layout L4 with page reads ("b").  An explicit VF2_C8 in the
+           # environment wins (MTP_CHOICES: "0" = the L0 layout, "a" = L4 with record reads)
+           "VF2_C8": "b"}  # fmt: skip
 P1K_SWITCHES = ("P1K_SEED", "P1K_R16", "MTP_V3W", "P1K_DEVRESET", "PF_NOKC")
+MTP_CHOICES = {"VF2_C8": ("0", "a", "b")}  # MTP-mode switches with more than two values: an explicit allowed value wins
 VLOG_KEEP = 1 << 16  # driver.vlog / v_tdraft rows kept (trimmed to this when twice as long)
 DRAM_S = float(os.environ.get("SV_MTP_DRAM_S", "60"))
 PROBE_EVERY = 100  # (dram_probe) prefill sublayers between samples
@@ -70,6 +74,10 @@ def preflight(mtp: str, env, pf_serve: bool):
             if env[k] not in ("0", "1"):
                 return f"--mtp on: {k}={env[k]} (P1K switches take 0 or 1)", {}
             out[k] = env[k]  # explicit wins: one item off alone
+        elif k in MTP_CHOICES and env.get(k) is not None:
+            if env[k] not in MTP_CHOICES[k]:
+                return f"--mtp on: {k}={env[k]} (takes {' / '.join(MTP_CHOICES[k])})", {}
+            out[k] = env[k]  # explicit wins (VF2_C8=0: the L0 layout)
         elif env.get(k) not in (None, v):
             return f"--mtp on needs {k}={v}; the environment has {k}={env.get(k)}", {}
     if out["PF_NOKC"] == "1" and out["MTP3_IPALL"] != "1":

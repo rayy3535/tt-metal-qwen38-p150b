@@ -1232,6 +1232,11 @@ def build_streamers(
         rdefs.append(("RR_SLICE", str(RR_SLICE)))
     if vfy is not None:
         rdefs.append(("GDN_VFY", "1"))
+        # VF2_C8: the conv8 layout's address defines (none for L0); the tensor must have that layout's page
+        from models.demos.blackhole.qwen38_2x262k.driver import conv8 as c8
+
+        assert int(vfy.conv8.shape[-1]) * 2 == c8.layout().page, (tuple(vfy.conv8.shape), c8.layout())
+        rdefs += sorted(c8.kernel_defines().items())
     if XO_TINY:
         rdefs.append(("XO_TINY", "1"))
     if WOUT_STREAM:

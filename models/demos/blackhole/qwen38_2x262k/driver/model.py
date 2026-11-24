@@ -322,9 +322,7 @@ class StepModel:
                     red=red,
                     scratch=scratch,
                 )
-                if (
-                    ql.vfy_on()
-                ):  # MTP3_VFY: the verify build's conv history (row user * 8 + pos % 8, channel order)
+                if ql.vfy_on():  # MTP3_VFY: the verify build's conv history (layout: driver/conv8.py, VF2_C8)
                     lay.conv8 = rdev(torch.zeros(*c8.C8_SHAPE), ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT)
                     lay.A.vfy_t = SimpleNamespace(pin=qsh["pos"], conv8=lay.conv8)
                 del full, shards

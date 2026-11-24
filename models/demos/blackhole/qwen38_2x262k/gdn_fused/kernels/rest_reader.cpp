@@ -261,6 +261,13 @@ void kernel_main() {
     // v_lag[r][i]: lag tile i (lag 3 - i) of row r: 0xFF = no history (parked row / before position 0), 0x80 = conv8
     // record (DRAM, a committed position), else the in-step row whose projection row holds that position
     uint8_t v_lag[4][3] = {};
+#ifdef C8_PAGEREAD
+    // VF2_C8 read mode b: the distinct users with a committed-history lag (v_uk[0 .. v_nu)) and each row's index among
+    // them; user k's 512 B conv8 page of column t is staged in the bottom half of lag tile 3 t + (k >> 1), at + (k & 1)
+    // * 512
+    uint32_t v_uk[4] = {0, 0, 0, 0}, v_nu = 0;
+    uint8_t v_uidx[4] = {0, 0, 0, 0};
+#endif
 #endif
 
     DeviceZoneScopedN("R-all");
@@ -348,18 +355,33 @@ void kernel_main() {
         for (uint32_t t = 0; t < qkv_tiles; ++t) {
             const uint32_t page = qkv_pages[t];
 #ifdef GDN_VFY
+#if defined(C8_PAGEREAD)
+            // (VF2_C8=b, conv8 L4: page C8_PU u + c, record at byte C8_OS slot) one 512 B read per (user, column):
+            // user k's page of column t staged in the bottom half of lag tile 3 t + (k >> 1) at + (k & 1) * 512
+            for (uint32_t k = 0; k < v_nu; ++k) {
+                noc_async_read(
+                    v_c8.get_noc_addr(C8_PU * v_uk[k] + page),
+                    s_l1 + (3 * t + (k >> 1)) * bf16_tile_bytes + half_tile + (k & 1) * (8 * C8_OS),
+                    8 * C8_OS);
+            }
+#else
             // committed history rows: 64 B conv8 records (64 B aligned) staged in the lag tile's bottom half (row r's
             // record at + 1024 + 64 r), copied into row r before the q/k/v wait
             for (uint32_t i = 0; i < 3; ++i) {
                 for (uint32_t r = 0; r < 4; ++r) {
                     if (v_lag[r][i] == 0x80) {
                         noc_async_read(
+#ifdef C8_L4
+                            v_c8.get_noc_addr(C8_PU * v_usr[r] + page) + C8_OS * ((v_pos[r] - (3 - i)) & 7),
+#else
                             v_c8.get_noc_addr(v_usr[r] * 8 + ((v_pos[r] - (3 - i)) & 7)) + page * 64,
+#endif
                             s_l1 + (3 * t + i) * bf16_tile_bytes + half_tile + r * 64,
                             64);
                     }
                 }
             }
+#endif
             (void)slot0;
             (void)slot1;
             (void)slot2;
@@ -433,6 +455,20 @@ void kernel_main() {
                     v_lag[r][i] = k;
                 }
             }
+#ifdef C8_PAGEREAD
+            for (uint32_t r = 0; r < 4; ++r) {
+                if (v_lag[r][0] == 0x80 || v_lag[r][1] == 0x80 || v_lag[r][2] == 0x80) {
+                    uint32_t k = 0;
+                    while (k < v_nu && v_uk[k] != v_usr[r]) {
+                        ++k;
+                    }
+                    if (k == v_nu) {
+                        v_uk[v_nu++] = v_usr[r];
+                    }
+                    v_uidx[r] = k;
+                }
+            }
+#endif
         }
 #endif
 #ifndef STREAM_GATE_SLOTS
@@ -561,8 +597,15 @@ void kernel_main() {
                     const uint32_t lt = s_l1 + (3 * t + i) * bf16_tile_bytes;
                     for (uint32_t r = 0; r < 4; ++r) {
                         if (v_lag[r][i] == 0x80) {
+#ifdef C8_PAGEREAD
+                            const uint32_t src = s_l1 + (3 * t + (v_uidx[r] >> 1)) * bf16_tile_bytes + half_tile +
+                                                 (v_uidx[r] & 1) * (8 * C8_OS) + C8_OS * ((v_pos[r] - (3 - i)) & 7);
+                            copy_words(src, lt + r * 32, 8);
+                            copy_words(src + 32, lt + 512 + r * 32, 8);
+#else
                             copy_words(lt + half_tile + r * 64, lt + r * 32, 8);
                             copy_words(lt + half_tile + r * 64 + 32, lt + 512 + r * 32, 8);
+#endif
                         }
                     }
                 }
@@ -603,7 +646,12 @@ void kernel_main() {
                 if ((t < 2 && qk_writer) || (t == 2 && lane0 == 0)) {
                     for (uint32_t r = 0; r < 4; ++r) {
                         if (v_pos[r] != v_parked) {
+#ifdef C8_L4
+                            const uint64_t d =
+                                v_c8.get_noc_addr(C8_PU * v_usr[r] + qkv_pages[t]) + C8_OS * (v_pos[r] & 7);
+#else
                             const uint64_t d = v_c8.get_noc_addr(v_usr[r] * 8 + (v_pos[r] & 7)) + qkv_pages[t] * 64;
+#endif
                             noc_async_write(p_l1 + t * bf16_tile_bytes + r * 32, d, 32);
                             noc_async_write(p_l1 + t * bf16_tile_bytes + 512 + r * 32, d + 32, 32);
                         }
