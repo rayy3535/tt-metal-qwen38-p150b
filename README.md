@@ -1,5 +1,8 @@
 # Qwen3.8-Flash-Next for 2 users at full 262K context on 4 x Blackhole p150b
 
+[![Code written by AI](https://img.shields.io/badge/code-written%20by%20AI-8A2BE2)](#written-by-ai)
+[![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)](#written-by-ai)
+
 ## Contents
 
 - [Accuracy at a glance](#accuracy-at-a-glance)
@@ -25,6 +28,7 @@
   - [Launch](#launch)
   - [Core parameters](#core-parameters)
   - [Requests](#requests)
+- [Measurement notes](#measurement-notes)
 
 ## Accuracy at a glance
 
@@ -42,7 +46,7 @@ used, are in [Evaluation results](#evaluation-results-accuracy).
 ## Performance at a glance
 
 Measured on 4 x Blackhole p150b: long-context mode, MTP speculative decode on, greedy. Values marked * come from the
-comparison below, which ran on an earlier revision of this code.
+comparison with the upstream model, which ran on an earlier revision of this code.
 
 | context | prefill, cold: time to first token | prefill throughput | decode, 1 user | decode, 2 users (aggregate) |
 |---|---|---|---|---|
@@ -55,22 +59,13 @@ comparison below, which ran on an earlier revision of this code.
 instead of re-reading the whole prompt. Time to first token p50 is 1.3 s for a 12-30K session and 1.6 s for a 40-60K
 session (closed-loop agent replay, one session).
 
-Notes:
-- **Prefill, cold:** client first token - submit, one run per point after a warm-up pass, prompts of 7,902 / 31,105 /
-  246,390 tokens. **Prefill throughput** = prompt tokens / time to first token, for a cold prompt (no reuse).
-- **128K prefill \*:** from the comparison below (126,094 tokens, n = 2). A 131,150-token prompt that resumes from a
-  saved 30,720-token prefix takes 26.7 s.
-- **Decode, 1 user \*:** from the comparison below: 1,000 generated tokens, 2.9-3.9 tokens per MTP pass. The 128K
-  value is server-side, because that response is a tool call, which the server sends as one chunk.
-- **Decode, 2 users:** both users decoding at the same time.
-  - At 8K and 32K: the server's step rate while both users decode (the sum of the two users' rates), one server run.
-  - At 128K: two users at about 131K tokens each (315-325 tok/s, n = 2). Both resume from their saved prompt state and
-    then decode 1,000 tokens each together; aggregate = all generated tokens / (last end - first token).
-  - At 250K: two users at about 246K tokens each, the same method as 128K (mean of 2 repeats in one server run).
-- The comparison with the upstream model and the method details are below.
+How each value was measured: see [Measurement notes](#measurement-notes) at the end. The comparison with the upstream
+model is in [Performance comparison](#performance-comparison-against-the-upstream-model-fn).
 
 > All comparison numbers are final for the code revision they name. Measured 2026-11-21 on one machine, both servers
 > on the same tt-metal tree.
+
+<a id="written-by-ai"></a>
 
 > **This code was written by AI.** Everything this repository adds on top of upstream tt-metal was written by AI
 > coding agents (Anthropic's Claude, running in Claude Code): the model implementation and its kernels, the host API
@@ -423,3 +418,18 @@ curl -s http://127.0.0.1:8020/v1/chat/completions -H 'Content-Type: application/
 
 `"stream": true` gives server-sent events. The reasoning text comes back in `reasoning_content`, separate from the
 answer in `content`.
+
+## Measurement notes
+
+For the table in [Performance at a glance](#performance-at-a-glance):
+- **Prefill, cold:** client first token - submit, one run per point after a warm-up pass, prompts of 7,902 / 31,105 /
+  246,390 tokens. **Prefill throughput** = prompt tokens / time to first token, for a cold prompt (no reuse).
+- **128K prefill \*:** from the [comparison](#performance-comparison-against-the-upstream-model-fn) (126,094 tokens, n = 2). A 131,150-token prompt that resumes from a
+  saved 30,720-token prefix takes 26.7 s.
+- **Decode, 1 user \*:** from the [comparison](#performance-comparison-against-the-upstream-model-fn): 1,000 generated tokens, 2.9-3.9 tokens per MTP pass. The 128K
+  value is server-side, because that response is a tool call, which the server sends as one chunk.
+- **Decode, 2 users:** both users decoding at the same time.
+  - At 8K and 32K: the server's step rate while both users decode (the sum of the two users' rates), one server run.
+  - At 128K: two users at about 131K tokens each (315-325 tok/s, n = 2). Both resume from their saved prompt state and
+    then decode 1,000 tokens each together; aggregate = all generated tokens / (last end - first token).
+  - At 250K: two users at about 246K tokens each, the same method as 128K (mean of 2 repeats in one server run).
