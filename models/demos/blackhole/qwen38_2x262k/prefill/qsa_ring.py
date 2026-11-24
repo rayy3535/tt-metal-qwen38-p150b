@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import collections
 import os
+from types import SimpleNamespace
 
 import torch
 
 import ttnn
 from models.demos.blackhole.qwen38_2x262k import ctx as ctxm
+from models.demos.blackhole.qwen38_2x262k.common import ixi as ixi_
 from models.demos.blackhole.qwen38_2x262k.common import p1k
 from models.demos.blackhole.qwen38_2x262k.common import program as fp
 from models.demos.blackhole.qwen38_2x262k.prefill import gr_tp
@@ -64,18 +66,39 @@ def qix_pool_budget() -> int:
 
 
 class Ix3Pool:
-    """QIX_SHARED: the QsaIX3 sets of one mesh, keyed by the bucket key count nb, least recently used first."""
+    """QIX_SHARED: the QsaIX3 sets of one mesh, keyed by the bucket key count nb, least recently used first.
+    IXI_POOL (common/ixi.py): one storage set (store_init, at chain construction) and one bucket view per nb over it, built on
+    first use and kept for the process: nothing is evicted, synchronised, allocated or uploaded per bucket."""
 
     def __init__(self, mesh):
         self.mesh, self.sets, self.pinned = mesh, collections.OrderedDict(), set()
         self.budget = qix_pool_budget()
+        self.store, self.views = None, {}
 
     def used(self) -> int:
         return sum(X.QsaIX3.nbytes(n) for n in self.sets)
 
+    def store_init(self, pfl: bool):
+        """IXI_POOL: the storage set of ixi.NMAX keys (fused form; MK / KT only without IXI_INC), allocated once."""
+        if self.store is None:
+            self.store = X.QsaIX3(self.mesh, ixi_.NMAX, pfl=pfl, ixf=True, inc=ixi_.inc())
+            count("IXI_POOL", "store")
+        assert self.store.pfl == pfl and self.store.inc == ixi_.inc(), "IXI_POOL: one storage form per process"
+        return self.store
+
     def get(self, nb: int, pin: bool = False, pfl: bool = False):
+        if ixi_.pool():
+            st = self.store_init(pfl)
+            x = self.views.get(nb)
+            if x is None:
+                x = self.views[nb] = X.QsaIX3(self.mesh, nb, pfl=pfl, ixf=True, inc=st.inc, store=st)
+                count("IXI_POOL", "view")
+            else:
+                count("IXI_POOL", "hit")
+            return x
         x = self.sets.get(nb)
         assert x is None or x.pfl == pfl, (nb, x.pfl, pfl)  # one pool = one page-table width
+        assert x is None or (x.ixf == ixi_.f() and x.inc == ixi_.inc()), "IXI_F / IXI_INC changed under a pooled set"
         if x is not None:
             self.sets.move_to_end(nb)
             count("QIX_SHARED", "hit")
@@ -157,25 +180,31 @@ def cs_host(mesh, cos, sin, p0: int):
 class IxGlue:
     """kernels/ixg_rd.cpp: QsaIX3's inputs (IQ4, MQ, IQT, NBK, K, MK, KT) from QN's IQ and the pooled-key pages (ipool on
     card u, the key copy KC elsewhere) - the device form of QsaIX3.load().  ring=True: d = the device index; else the
-    given d on every device (one-card form)."""
+    given d on every device (one-card form).
+    IXI switches (common/ixi.py): nok (default None = IXI_F) -> the key side writes no K tiles (define IXG_NOK; the fused IX1
+    reads the pages itself; outs[4] is then any tile tensor, e.g. MK, for the accessor slot); rows = (r0, n) (default: all of
+    K's row tiles) -> the key side derives the n row tiles from r0 only (IXI_INC: the layer's new keys; IXI_POOL: the bucket's
+    rows of the storage set).  With either, the descriptor-cache key carries the role-1 core count and the row range instead of K's row
+    count (one storage set serves every bucket, so buffer addresses do not tell buckets apart)."""
 
-    def __init__(self, mesh):
+    def __init__(self, mesh, nok=None):
         self.mesh, self._p = mesh, {}
         self.g2 = qix_glue2()
+        self.nok = ixi_.f() if nok is None else bool(nok)
 
-    def _ncores(self, K):
-        """(role-0 cores, role-1 cores): 4 / min(32, row tiles); QIX_GLUE2: 4 GLUE2_Q / the rest of the grid."""
-        nrt = K.padded_shape[-2] // 32
+    def _ncores(self, nrt):
+        """(role-0 cores, role-1 cores) for nrt key row tiles: 4 / min(32, nrt); QIX_GLUE2: 4 GLUE2_Q / the rest of the
+        grid."""
         if self.g2:
             grid = self.mesh.compute_with_storage_grid_size()
             n0 = 4 * GLUE2_Q
             return n0, min(grid.x * grid.y - n0, nrt)
         return 4, min(32, nrt)
 
-    def _rts(self, IQ, SRC, PT, outs, d, u, p0, V, nblk, cores, nokc=False):
+    def _rts(self, IQ, SRC, PT, outs, d, u, p0, V, nblk, cores, nokc=False, rows=None):
         IQ4, MQ, IQT, NBK, K, MK, KT = outs
-        nrt = K.padded_shape[-2] // 32
-        n0, nk = self._ncores(K)
+        R0, nrt = rows if rows is not None else (0, K.padded_shape[-2] // 32)
+        n0, nk = self._ncores(nrt)
         qn = n0 // 4
         per = [nrt // nk + (1 if i < nrt % nk else 0) for i in range(nk)]
         rts = []
@@ -188,7 +217,7 @@ class IxGlue:
                     + ([q] if self.g2 else [])
                 )
                 rts.append((cores[j * qn + q], a + [0] * (11 - len(a))))
-        r0 = 0
+        r0 = R0
         for i in range(nk):
             # owner flag: page-table reads (ipool[u]); PF_NOKC (no key copy): on every card
             a = [1] + [t.buffer_address() for t in (SRC, K, MK, KT, PT)] + [int(d == u or nokc), u, r0, per[i], nblk]
@@ -196,54 +225,72 @@ class IxGlue:
             r0 += per[i]
         return rts
 
-    def _cores(self, K):
+    def _cores(self, nrt):
         grid = self.mesh.compute_with_storage_grid_size()
-        n0, nk = self._ncores(K)
+        n0, nk = self._ncores(nrt)
         return [ttnn.CoreCoord(i % grid.x, i // grid.x) for i in range(n0 + nk)]
 
-    def _desc(self, IQ, SRC, PT, outs, d, u, p0, V, nblk, nokc=False):
+    def _desc(self, IQ, SRC, PT, outs, d, u, p0, V, nblk, nokc=False, rows=None):
         IQ4, MQ, IQT, NBK, K, MK, KT = outs
-        cores = self._cores(K)
+        nrt = rows[1] if rows is not None else K.padded_shape[-2] // 32
+        cores = self._cores(nrt)
         cs = ttnn.CoreRangeSet([ttnn.CoreRange(c, c) for c in cores])
-        rts = self._rts(IQ, SRC, PT, outs, d, u, p0, V, nblk, cores, nokc=nokc)
+        rts = self._rts(IQ, SRC, PT, outs, d, u, p0, V, nblk, cores, nokc=nokc, rows=rows)
         ct = sum((fp.accessor_args(t) for t in (IQ, IQ4, MQ, IQT, NBK, SRC, K, MK, KT, PT)), [])
         dfs = A.pt_defs(PT) + ([("IXG2", "1"), ("IXG2_Q", str(GLUE2_Q))] if self.g2 else [])
+        dfs += [("IXG_NOK", "1")] if self.nok else []
         k = fp.reader_kernel(_KDIR + "ixg_rd.cpp", cs, ct, rts, defines=dfs)
         return fp.program_descriptor([k], [fp.cb_descriptor(0, ttnn.uint32, 70 * 1024, 1, cs)])
 
-    def run(self, IQ, IPOOL, KC, PT, outs, *, u, p0, V, nblk, d=None):
-        """KC None (PF_NOKC): no key copy, every card reads user u's ipool pages through the page table (owner form)."""
+    def ixi_key(self, rows):
+        """the IXI part of the descriptor-cache key (() without the IXI switches, so those keys are unchanged): the K-write form and the role-1 core
+        count (the core set) - the row range itself is written into the runtime args per call."""
+        if not self.nok and rows is None:
+            return ()
+        nrt = rows[1]
+        return ("ixi", self.nok, self._ncores(nrt)[1])
+
+    def run(self, IQ, IPOOL, KC, PT, outs, *, u, p0, V, nblk, d=None, rows=None):
+        """KC None (PF_NOKC): no key copy, every card reads user u's ipool pages through the page table (owner form).
+        rows: (r0, n) key row tiles to derive (required with nok: the K-row count does not come from K's shape then).
+        """
         nokc = KC is None
+        assert rows is not None or not self.nok, "IXG_NOK: pass the key row range"
         io = [IQ, IPOOL] + ([] if nokc else [KC]) + [PT] + list(outs)
         kca = () if nokc else (KC,)
         own = lambda x: x == u or nokc  # noqa: E731
+        xk = self.ixi_key(rows)
+        nrt_k = () if xk else (outs[4].padded_shape[-2],)
         if flag(
             "PF_DK_IXG"
         ):  # PF_DK_IXG: one descriptor per (tensor set, card roles' accessor args); per call p0 / V (glue
-            # cores, args 8 / 9) and SRC / owner / u / nblk (key cores, args 1 / 6 / 7 / 10) written per card
-            rows, cols = self.mesh.shape
-            n = rows * cols
+            # cores, args 8 / 9) and SRC / owner / u / first row / rows per core / nblk (key cores, args 1 / 6 / 7 / 8 / 9 / 10) written per card
+            rows_, cols = self.mesh.shape
+            n = rows_ * cols
             dd = [(i if d is None else d) for i in range(n)]
             ct = tuple(tuple(fp.accessor_args(IPOOL if own(x) else KC)) for x in dd)
             # + K's key rows: with the QIX_SHARED pool's budget a deallocated set may be followed by another size at the same addresses
             key = ("dk",) + tuple(t.buffer_address() for t in (IQ, IPOOL, *kca, PT, *outs)) + (d, A.pt_w(PT), ct, self.g2,
-                                                                                         outs[4].padded_shape[-2])  # fmt: skip
+                                                                                         *nrt_k)  # fmt: skip
             key += ("nokc",) if nokc else ()
+            key += xk
             S = self._p.get(key)
             count("PF_DK_IXG", "build" if S is None else "hit")
             if S is None:
                 mpd = _mesh_prog(self.mesh, lambda i: self._desc(IQ, IPOOL if own(dd[i]) else KC, PT, outs, dd[i], u, p0,
-                                                                 V, nblk, nokc))  # fmt: skip
+                                                                 V, nblk, nokc, rows))  # fmt: skip
                 S = self._p[key] = RtSlots(seal(mpd))
-                S.cores = self._cores(outs[4])
+                S.cores = self._cores(rows[1] if rows is not None else outs[4].padded_shape[-2] // 32)
             else:
                 for m, x in enumerate(dd):
-                    S.assign_m(m, 0, self._rts(IQ, IPOOL if own(x) else KC, PT, outs, x, u, p0, V, nblk, S.cores, nokc))
+                    S.assign_m(m, 0, self._rts(IQ, IPOOL if own(x) else KC, PT, outs, x, u, p0, V, nblk, S.cores, nokc,
+                                               rows))  # fmt: skip
             ttnn.generic_op(io, S.mpd)
             return outs
         key = tuple(t.buffer_address() for t in (IQ, IPOOL, *kca, PT, *outs)) + (u, p0, V, nblk, d, A.pt_w(PT), self.g2,
-                                                                                outs[4].padded_shape[-2])  # fmt: skip
+                                                                                *nrt_k)  # fmt: skip
         key += ("nokc",) if nokc else ()
+        key += xk + ((tuple(rows),) if xk else ())
         if key not in self._p:
             self._p[key] = _mesh_prog(
                 self.mesh,
@@ -258,10 +305,99 @@ class IxGlue:
                     V,
                     nblk,
                     nokc,
+                    rows,
                 ),
             )
         ttnn.generic_op(io, self._p[key])
         return outs
+
+
+class IncState:
+    """IXI_INC watermark of one QSA layer (host logic only): nv = the number of keys whose MK / KT rows the layer holds for the
+    current prompt.  plan(npad) -> the row tiles (r0, n) to derive for a select over npad keys; commit(npad) after the glue
+    is enqueued.  Keys are 128 per chunk (npad = 128 (k + 1)), so nv and npad are multiples of 32 (whole row tiles).  A
+    select below the watermark (npad < nv) means a missing reset at the prompt begin: refused."""
+
+    def __init__(self):
+        self.nv = 0
+
+    def reset(self):
+        self.nv = 0
+
+    def plan(self, npad: int):
+        assert npad % 32 == 0 and self.nv % 32 == 0, (npad, self.nv)
+        assert (
+            self.nv <= npad
+        ), f"IXI_INC: watermark {self.nv} beyond the chunk's {npad} keys (no reset at the prompt begin?)"
+        return self.nv // 32, (npad - self.nv) // 32
+
+    def commit(self, npad: int):
+        self.nv = max(self.nv, int(npad))
+
+
+_IXI_REF = {}  # IXI_CHECK (test only): mesh -> (nb, the unfused reference QsaIX3, its glue)
+
+
+def _tiles(t, nc_store):
+    """[4 cards x 128 rows, nc_store x 32] logical (to_torch of a [128, nc_store x 32] tile tensor) -> [4, 4 x nc_store, 32, 32]
+    = per card the tiles in page order (page p = tile (p // nc_store, p % nc_store))."""
+    return t.reshape(4, 4, 32, nc_store, 32).permute(0, 1, 3, 2, 4).reshape(4, 4 * nc_store, 32, 32)
+
+
+def ixi_check(ring, npad):
+    """IXI_CHECK (test only, common/ixi.py): re-run this select's IX1 inputs / outputs the unfused way (IxGlue with K writes,
+    ttnn D / W + the bound program) into a reference set of the same bucket and compare, per card, bitwise:
+    LO / HI of every row's live keys (j < N_row, N from NBK; tile (r, c) of the bucket = page r * NC + c of either layout) and
+    MK / KT rows < npad (IXI_INC: the layer's state; else the set's).  rtp.count("IXI_CHECK", "ok" | "bad")."""
+    mesh, x = ring.mesh, ring.ix3
+    nb = x.npad
+    NC = nb // 32
+    ent = _IXI_REF.get(mesh)
+    if ent is None or ent[0] != nb:
+        if ent is not None:
+            ent[1].free()
+        ref = X.QsaIX3(mesh, nb, pfl=x.pfl, ixf=False, inc=False)
+        ent = _IXI_REF[mesh] = (nb, ref, IxGlue(mesh, nok=False))
+    _, ref, rg = ent
+    rg.run(ring.IQ, ring.st["ip"], ring.st["kc"], ring.PT, (ref.IQ4, ref.MQ, ref.IQT, ref.NBK, ref.K, ref.MK, ref.KT),
+           u=ring.u, p0=ring.p0, V=ring.V, nblk=npad // 16)  # fmt: skip
+    ref.ix1.run(ref.IQ4, ref.K, ref.MQ, ref.MK, ref.D, ref.W, ref.outs)
+    comp = ttnn.ConcatMeshToTensor(mesh, dim=0)
+    rd = lambda t: ttnn.to_torch(t, mesh_composer=comp)  # noqa: E731
+    nbk = rd(x.NBK).to(torch.int32).reshape(4, 128, 16)[:, :, 0]
+    bad = {}
+    for nm, i in (("LO", 2), ("HI", 3)):
+        a, b_ = rd(x.outs[i]).float(), rd(ref.outs[i]).float()
+        ta = _tiles(a, a.shape[-1] // 32)[:, : 4 * NC]
+        tb = _tiles(b_, NC)
+        va = ta.reshape(4, 4, NC, 32, 32).contiguous().view(torch.int32)  # [card, r, c, y, x]
+        vb = tb.reshape(4, 4, NC, 32, 32).contiguous().view(torch.int32)
+        j = (32 * torch.arange(NC))[:, None] + torch.arange(32)[None, :]  # [c, x]: key index
+        live = j[None, None, :, None, :] < nbk.reshape(4, 4, 32)[:, :, None, :, None]  # [card, r, c, y, x]
+        bad[nm] = int(((va != vb) & live).sum())
+    k = ring.ixk if x.inc else None
+    MK = k.MK if k is not None else x.MK
+    KT = k.KT if k is not None else x.KT
+    bad["MK"] = int(
+        (
+            rd(MK).reshape(4, -1, 32)[:, :npad].view(torch.int16)
+            != rd(ref.MK).reshape(4, -1, 32)[:, :npad].view(torch.int16)
+        ).sum()
+    )
+    bad["KT"] = int(
+        (
+            rd(KT).reshape(4, -1, 128)[:, :npad].view(torch.int16)
+            != rd(ref.KT).reshape(4, -1, 128)[:, :npad].view(torch.int16)
+        ).sum()
+    )
+    ok = not any(bad.values())
+    count("IXI_CHECK", "ok" if ok else "bad")
+    if not ok:
+        print(
+            f"IXI_CHECK MISMATCH layer {ring.layer} p0 {ring.p0} V {ring.V} npad {npad} bucket {nb} u {ring.u}: {bad}",
+            flush=True,
+        )
+    return bad
 
 
 class SelCopy:
@@ -356,8 +492,14 @@ class QsaRing:
             self.st = {k: th(init[k], lay=ttnn.ROW_MAJOR_LAYOUT) for k in shapes}
         self.kv_only = kv_only
         self.p0 = self.V = None
+        self.layer = None  # the model layer index (set by the chain; IXI_CHECK's layer filter)
+        self.ixk = None
         if kv_only:
             return
+        if ixi_.inc():  # IXI_INC: this layer's key-side state (allocated here, before any capture; zeroed once)
+            n = ixi_.NMAX
+            self.ixk = SimpleNamespace(MK=th(torch.zeros(n, 32, dtype=BF)),
+                                       KT=th(torch.zeros(n, 128, dtype=BF), lay=ttnn.ROW_MAJOR_LAYOUT), inc=IncState())  # fmt: skip
         # E: QA dense (sparse: _sparse_setup)
         self.qad = A.QsaQAD(mesh)
         self.CTA = th(A.const_tiles())
@@ -430,16 +572,50 @@ class QsaRing:
         x = self.ix3
         return (x.IQ4, x.MQ, x.IQT, x.NBK, x.K, x.MK, x.KT)
 
+    def ixi_reset(self):
+        """IXI_INC: the layer's watermark <- 0 (every prompt begin, fresh or resumed: the next sparse select re-derives the key
+        side of every key < its npad from the pages, so no state crosses a prompt, a restore, an abort or another slot).
+        """
+        if self.ixk is not None:
+            self.ixk.inc.reset()
+
     def select(self):
         """IX on the ring: glue -> QsaIX3 -> pack -> Rex ss all-gather -> unpack -> SEL (every card, all 512 rows)."""
         npad = self.npad
-        self.glue.run(self.IQ, self.st["ip"], self.st["kc"], self.PT, self.ix_outs(), u=self.u, p0=self.p0, V=self.V,
-                      nblk=npad // 16)  # fmt: skip
-        self.ix3.run()
+        if not ixi_.f():
+            self.glue.run(self.IQ, self.st["ip"], self.st["kc"], self.PT, self.ix_outs(), u=self.u, p0=self.p0, V=self.V,
+                          nblk=npad // 16)  # fmt: skip
+            self.ix3.run()
+        else:
+            self._select_f(npad)
+        if ixi_.check_on(self.layer if self.layer is not None else -1):
+            ixi_check(self, npad)
         self.selc.pack(self.ix3.OUT, self.BM)
         self.rex.run(self.BM, self.AGO)
         self.selc.unpack(self.AGO, self.SEL)
         return self.SEL
+
+    def _select_f(self, npad):
+        """IXI_F (+ IXI_POOL / IXI_INC): the glue without K writes over the key rows to derive, then the fused IX1 + SEL1 / IX2 / SEL2."""
+        x = self.ix3
+        assert x.ixf and x.inc == ixi_.inc(), "IXI: the IX3 set's form differs from the switches"
+        if self.glue.nok is not True:  # the glue's form follows IXI_F (tests flip the switch between instances)
+            self.glue = IxGlue(self.mesh, nok=True)
+        ip, kc = self.st["ip"], self.st["kc"]
+        if x.inc:
+            k = self.ixk
+            assert k is not None, "IXI_INC set after this layer was built (no state)"
+            rows = k.inc.plan(npad)
+            outs = (x.IQ4, x.MQ, x.IQT, x.NBK, k.MK, k.MK, k.KT)
+        else:
+            rows = (0, x.npad // 32)  # every row tile of the bucket (zero rows past nblk)
+            outs = (x.IQ4, x.MQ, x.IQT, x.NBK, x.MK, x.MK, x.KT)
+        self.glue.run(self.IQ, ip, kc, self.PT, outs, u=self.u, p0=self.p0, V=self.V, nblk=npad // 16, rows=rows)
+        if x.inc:
+            k.inc.commit(npad)
+        f = SimpleNamespace(IPOOL=ip, KC=kc, PT=self.PT, u=self.u, NCV=npad // 32, d=None,
+                            MK=k.MK if x.inc else None, KT=k.KT if x.inc else None)  # fmt: skip
+        x.run(f)
 
     def qn_ins(self):
         return (self.P, self.GM, self.CS, self.CTN), (self.QH, self.KH, self.IQ)

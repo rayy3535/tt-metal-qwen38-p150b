@@ -19,6 +19,9 @@
 // Runtime: role 0: 0 role, 1 IQ, 2 IQ4, 3 MQ, 4 IQT, 5 NBK, 6 j, 7 d, 8 p0, 9 V.
 //          role 1: 0 role, 1 SRC, 2 K, 3 MK, 4 KT, 5 PT, 6 owner, 7 u, 8 R_0, 9 nR, 10 nblk (16-key blocks valid).
 // Compile time: accessor args of IQ, IQ4, MQ, IQT, NBK, SRC, K, MK, KT, PT.
+//
+// IXI_F (define IXG_NOK): role 1 writes no K tiles (the fused IX1 program reads the pooled-key pages); MK / KT as above
+// (IXI_INC: into the layer's state tensors, only the row tiles of the keys new to the layer).
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
 #ifndef PT_W
@@ -189,6 +192,9 @@ void kernel_main() {
         return;
     }
     const auto SRC = TensorAccessor(a_src, get_arg_val<uint32_t>(1), 4096);
+#ifdef IXG_NOK
+    [[maybe_unused]]
+#endif
     const auto K = TensorAccessor(a_k, get_arg_val<uint32_t>(2), 2048);
     const auto MK = TensorAccessor(a_mk, get_arg_val<uint32_t>(3), 2048);
     const auto KT = TensorAccessor(a_kt, get_arg_val<uint32_t>(4), 256);
@@ -218,11 +224,13 @@ void kernel_main() {
         noc_async_read_barrier();
         invalidate_l1_cache();
         // K tiles: tile t = [page 0 tile t (1 KB) | page 1 tile t (1 KB)]
+#ifndef IXG_NOK  // IXI_F: the fused IX1 program reads the key pages itself; no K tensor
         for (uint32_t t = 0; t < 4; ++t) {
             copy_words(kt + t * 2048, pg + t * 1024, 1024);
             copy_words(kt + t * 2048 + 1024, pg + 4096 + t * 1024, 1024);
             noc_async_write_tile(R * 4 + t, K, kt + t * 2048);
         }
+#endif
         // MK and KT rows: key y (0..31) = page y / 16, row y % 16; element (t, f, c) at ((t * 2 + f) * 16 + row) * 16 +
         // c
         zero_words(mk, 2048);

@@ -20,6 +20,7 @@ import struct
 import torch
 
 import ttnn
+from models.demos.blackhole.qwen38_2x262k.common import ixi as ixi_
 from models.demos.blackhole.qwen38_2x262k.common import program as fp
 from models.demos.blackhole.qwen38_2x262k.prefill.rtp import seal as _ps4_seal
 
@@ -97,6 +98,105 @@ class QsaIX1:
         NC = D.padded_shape[-1] // 32
         ttnn.generic_op([D, W] + list(outs), self._program(D, W, outs, NC))
         return outs
+
+
+class QsaIX1F:
+    """IXI_F (common/ixi.py): the fused IX1, one program per card (kernels/ix1f_rd / cp / wr.cpp) in place of QsaIX1's two
+    ttnn matmuls + bound program: per core a contiguous range of the bucket's NC key columns (32 keys each), all 4 row tiles
+    per column; the key tiles come straight from the pooled-key pages (ipool through PT row u on the owner card or on every
+    card with PF_NOKC, the key copy KC page b elsewhere), MK from the given tensor (the set's, or the layer's IXI_INC state);
+    writes only LO / HI [128, NC x 32] fp32 tiles (S / E have no reader in the served path).
+    One cached descriptor per program shape: key = (IQ4 / MQ / LO / HI addresses, NC, the page-table width, every card's SRC
+    accessor args, the probe set); SRC / MK / PT addresses, owner, u and NCV (valid columns) are written into the reader's
+    runtime args per call (RtSlots), so the 12 layers / 2 slots / 8 chunks of a bucket share one entry.  NC is part of the
+    key: under IXI_POOL every bucket uses the same storage addresses."""
+
+    NCORE = 100
+
+    def __init__(self, mesh):
+        self.mesh, self._p = mesh, {}
+
+    @staticmethod
+    def split(NC: int, ncore_max: int = 100):
+        """[(c0, nc)] per core: the NC columns in contiguous ranges over min(ncore_max, NC) cores (sizes differ by <= 1)."""
+        n = min(ncore_max, NC)
+        per = [NC // n + (1 if i < NC % n else 0) for i in range(n)]
+        c0 = [sum(per[:i]) for i in range(n)]
+        return list(zip(c0, per))
+
+    @staticmethod
+    def key(IQ4, MQ, LO, HI, PT, NC, cts, diag):
+        from models.demos.blackhole.qwen38_2x262k.prefill import qsa_qa as A_
+
+        return ("ix1f", IQ4.buffer_address(), MQ.buffer_address(), LO.buffer_address(), HI.buffer_address(), int(NC),
+                A_.pt_w(PT), tuple(tuple(c) for c in cts), diag)  # fmt: skip
+
+    def _cores(self, NC):
+        grid = self.mesh.compute_with_storage_grid_size()
+        return [ttnn.CoreCoord(i % grid.x, i // grid.x) for i in range(len(self.split(NC, self.NCORE)))]
+
+    def _rd_rts(self, cores, NC, IQ4, MQ, SRC, MK, PT, owner, u, NCV):
+        return [(c, [IQ4.buffer_address(), MQ.buffer_address(), SRC.buffer_address(), MK.buffer_address(),
+                     PT.buffer_address(), int(owner), int(u), c0, nc, int(NCV)])
+                for c, (c0, nc) in zip(cores, self.split(NC, self.NCORE))]  # fmt: skip
+
+    def _desc(self, IQ4, MQ, SRC, MK, PT, LO, HI, NC, owner, u, NCV, diag):
+        from models.demos.blackhole.qwen38_2x262k.prefill import qsa_qa as A_
+
+        cores = self._cores(NC)
+        cs = ttnn.CoreRangeSet([ttnn.CoreRange(c, c) for c in cores])
+        dg = set(diag.split(",")) if diag else set()
+        rct = (
+            fp.accessor_args(IQ4)
+            + fp.accessor_args(MQ)
+            + fp.accessor_args(SRC)
+            + fp.accessor_args(MK)
+            + fp.accessor_args(PT)
+        )
+        rd = fp.reader_kernel(_KDIR + "ix1f_rd.cpp", cs, rct, self._rd_rts(cores, NC, IQ4, MQ, SRC, MK, PT, owner, u, NCV),
+                              defines=A_.pt_defs(PT) + ([("IXF_NOREAD", "1")] if "noread" in dg else []))  # fmt: skip
+        cp = fp.compute_kernel(_KDIR + "ix1f_cp.cpp", cs, [], [(c, [nc]) for c, (_, nc) in zip(cores, self.split(NC, self.NCORE))],
+                               defines=[("QIX_CBITS", f"0x{cprime_bits(c_tile()):08X}u")] + ([("IXF_NOCOMP", "1")] if "nocomp" in dg else []),
+                               fidelity=ttnn.MathFidelity.HiFi4, fp32_dest=True, dst_full_sync=True)  # fmt: skip
+        wdf = ([("IXF_NOWRITE", "1")] if "nowrite" in dg else []) + ([("IXF_ROWW", "1")] if "roww" in dg else [])
+        wr = fp.writer_kernel(_KDIR + "ix1f_wr.cpp", cs, fp.accessor_args(LO) + fp.accessor_args(HI),
+                              [(c, [LO.buffer_address(), HI.buffer_address(), c0, nc, NC])
+                               for c, (c0, nc) in zip(cores, self.split(NC, self.NCORE))], defines=wdf)  # fmt: skip
+        ptb = max(2048, A_.pt_w(PT) * 4)
+        cbs = [fp.cb_descriptor(0, ttnn.bfloat16, 2048, 68, cs), fp.cb_descriptor(1, ttnn.bfloat16, 2048, 10, cs),
+               fp.cb_descriptor(2, ttnn.uint32, ptb, 1, cs), fp.cb_descriptor(16, ttnn.float32, 4096, 4, cs)]  # fmt: skip
+        return fp.program_descriptor([rd, cp, wr], cbs)
+
+    def run(self, IQ4, MQ, IPOOL, KC, PT, MK, LO, HI, *, u, NC, NCV, d=None, nokc=False, diag=None):
+        """IQ4 [512, 128] / MQ [128, 32] bf16 tiles (the glue's), IPOOL / KC the pooled-key pages (KC None with PF_NOKC),
+        PT the page table [4, PT_W] u32, MK [>= NC x 32, 32] bf16 tiles, LO / HI [128, >= NC x 32] fp32 tiles (the first NC
+        x 32 columns are this bucket's); NC = the bucket's key columns, NCV = the chunk's valid columns (npad / 32); d = the
+        card role on every device (one-card form) or None (ring: the device index)."""
+        from models.demos.blackhole.qwen38_2x262k.prefill.qsa_ring import _mesh_prog
+        from models.demos.blackhole.qwen38_2x262k.prefill.rtp import RtSlots, count
+
+        nokc = nokc or KC is None
+        diag = ixi_.diag() if diag is None else diag
+        rows, cols = self.mesh.shape
+        dd = [(i if d is None else d) for i in range(rows * cols)]
+        own = [int(x == u or nokc) for x in dd]
+        srcs = [IPOOL if o else KC for o in own]
+        cts = [fp.accessor_args(s) for s in srcs] + [fp.accessor_args(MK), fp.accessor_args(PT)]
+        key = self.key(IQ4, MQ, LO, HI, PT, NC, cts, diag)
+        S = self._p.get(key)
+        count("IXI_F", "build" if S is None else "hit")
+        if S is None:
+            mpd = _mesh_prog(
+                self.mesh, lambda i: self._desc(IQ4, MQ, srcs[i], MK, PT, LO, HI, NC, own[i], u, NCV, diag)
+            )
+            S = self._p[key] = RtSlots(_ps4_seal(mpd))
+            S.cores = self._cores(NC)
+        else:
+            for m in range(rows * cols):
+                S.assign_m(m, 0, self._rd_rts(S.cores, NC, IQ4, MQ, srcs[m], MK, PT, own[m], u, NCV))
+        io = [IQ4, MQ, IPOOL] + ([] if KC is None else [KC]) + [PT, MK, LO, HI]
+        ttnn.generic_op(io, S.mpd)
+        return LO, HI
 
 
 class QsaIX2:
@@ -565,10 +665,16 @@ class QsaIX3:
     64 k) + r).  QIX_SFSEL=1 runs SEL1 on the SFPU instead (count-probe bisection, same outputs); Mq / Mk' from load()
     or the ring's glue."""
 
-    def __init__(self, mesh, npad, pfl=False):
+    def __init__(self, mesh, npad, pfl=False, *, ixf=None, inc=None, store=None):
+        """ixf / inc (default None = the switches IXI_F / IXI_INC): ixf -> the fused IX1 (no K / D / W / S / E tensors; run()
+        needs the key-page context ``f``); inc -> no MK / KT in the set (the layer's IXI_INC state is passed to run()).
+        store (IXI_POOL): an IX3 storage set (QsaIX3 of the maximum key count, same ixf / inc / pfl) whose tensors this
+        bucket-sized set uses (programs index by this set's npad / NC; nothing is allocated or freed here)."""
         self.mesh, self.npad, self._p = mesh, npad, {}
         self.pfl = bool(pfl)  # B4_PFL id-list selection rows (the page table is > 512 entries wide)
-        self.ix1, self.ix2 = QsaIX1(mesh), QsaIX2(mesh)
+        self.ixf = ixi_.f() if ixf is None else bool(ixf)
+        self.inc = (ixi_.inc() if inc is None else bool(inc)) and self.ixf
+        self.store = store
         self.dm = qix_dm()
         self.bs, self.sreg = qix_bs(), qix_sreg()
         self.sfast = qix_sfast()
@@ -582,26 +688,72 @@ class QsaIX3:
             ), "QIX_SPILL needs QIX_DM=1 QIX_BS=2 QIX_SFAST=1"
             assert npad <= spill_nmax(), (npad, spill_nmax())
         self.sp = spill_bufs(mesh) if (self.spill or self.ovc) else None
+        if (
+            store is not None
+        ):  # IXI_POOL: this bucket's view of the storage set (shared tensors, shared IX1F / IX2 caches)
+            assert store.ixf and self.ixf and store.inc == self.inc and store.pfl == self.pfl, "store form mismatch"
+            assert npad <= store.npad, (npad, store.npad)
+            for n in (
+                "IQ4",
+                "K",
+                "MQ",
+                "MK",
+                "D",
+                "W",
+                "outs",
+                "IQT",
+                "KT",
+                "INB",
+                "II",
+                "JJ",
+                "CNT",
+                "OUT",
+                "NBK",
+                "EX",
+            ):
+                setattr(self, n, getattr(store, n))
+            self.ix1, self.ix1f, self.ix2 = None, store.ix1f, store.ix2
+            return
+        self.ix1, self.ix2 = (None if self.ixf else QsaIX1(mesh)), QsaIX2(mesh)
+        self.ix1f = QsaIX1F(mesh) if self.ixf else None
         self.ix2.sp = self.sp if self.spill else None
         DR = ttnn.DRAM_MEMORY_CONFIG
         z = lambda s, dt, lay=ttnn.ROW_MAJOR_LAYOUT: ttnn.from_torch(  # noqa: E731
             torch.zeros(*s, dtype=torch.float32 if dt == ttnn.float32 else torch.bfloat16 if dt == ttnn.bfloat16 else torch.int32),
             dtype=dt, layout=lay, device=mesh, memory_config=DR)  # fmt: skip
         T = ttnn.TILE_LAYOUT
-        self.IQ4, self.K = z((512, 128), ttnn.bfloat16, T), z((npad, 128), ttnn.bfloat16, T)
-        self.MQ, self.MK = z((128, 32), ttnn.bfloat16, T), z((npad, 32), ttnn.bfloat16, T)
-        self.D, self.W = z((512, npad), ttnn.float32, T), z((128, npad), ttnn.float32, T)
-        self.outs = [z((128, npad), ttnn.float32, T) for _ in range(4)]
-        self.IQT, self.KT = z((128, 512), ttnn.bfloat16), z((npad, 128), ttnn.bfloat16)
+        # allocation order: with the IXI switches off, the same DRAM layout as without them; IXI_F: no K / D / W / S / E
+        # (outs[0], outs[1] = None: no reader in the served path); IXI_INC: no MK / KT (the layer's state, QsaRing.ixk, passed to run())
+        self.IQ4 = z((512, 128), ttnn.bfloat16, T)
+        self.K = None if self.ixf else z((npad, 128), ttnn.bfloat16, T)
+        self.MQ = z((128, 32), ttnn.bfloat16, T)
+        self.MK = None if self.inc else z((npad, 32), ttnn.bfloat16, T)
+        if self.ixf:
+            self.D = self.W = None
+            self.outs = [None, None] + [z((128, npad), ttnn.float32, T) for _ in range(2)]
+        else:
+            self.D, self.W = z((512, npad), ttnn.float32, T), z((128, npad), ttnn.float32, T)
+            self.outs = [z((128, npad), ttnn.float32, T) for _ in range(4)]
+        self.IQT = z((128, 512), ttnn.bfloat16)
+        self.KT = None if self.inc else z((npad, 128), ttnn.bfloat16)
         self.INB, self.II, self.JJ = z((128, 256), ttnn.uint32), z((128, CAP), ttnn.uint32), z((128, CAP), ttnn.uint32)
         self.CNT, self.OUT = z((128, 16), ttnn.uint32), z((128, 256), ttnn.uint32)
         self.NBK = z((128, 16), ttnn.uint32)
         self.EX = z((32, 32 * 128 * CAP // 1024), ttnn.float32, T)
 
     @staticmethod
-    def nbytes(npad: int) -> int:
-        """DRAM bytes per card of one set (the tensors above): 5,184 B per key + 3,694,592 B independent of npad."""
-        per_key = 256 + 64 + 2048 + 512 + 4 * 512 + 256  # K, MK, D, W, outs x 4, KT
+    def per_key(ixf=None, inc=None) -> int:
+        """DRAM bytes per key of one set: 5,184 (K 256, MK 64, D 2,048, W 512, outs 4 x 512, KT 256); IXI_F 1,344 (MK, LO / HI,
+        KT); IXI_F + IXI_INC 1,024 (LO / HI)."""
+        ixf = ixi_.f() if ixf is None else ixf
+        inc = (ixi_.inc() if inc is None else inc) and ixf
+        if not ixf:
+            return 256 + 64 + 2048 + 512 + 4 * 512 + 256
+        return 2 * 512 + (0 if inc else 64 + 256)
+
+    @staticmethod
+    def nbytes(npad: int, ixf=None, inc=None) -> int:
+        """DRAM bytes per card of one set (the tensors above): per_key() x npad + 3,694,592 B independent of npad."""
         fixed = (
             512 * 128 * 2
             + 128 * 32 * 2
@@ -611,15 +763,18 @@ class QsaIX3:
             + 2 * 128 * 16 * 4  # INB + OUT, II + JJ, CNT + NBK
             + 32 * (32 * 128 * CAP // 1024) * 4
         )  # EX  # fmt: skip
-        return per_key * npad + fixed
+        return QsaIX3.per_key(ixf, inc) * npad + fixed
 
     def free(self):
-        """(QIX_SHARED pool) deallocate every device tensor of the set; the object must not be used afterwards."""
+        """(QIX_SHARED pool) deallocate every device tensor of the set; the object must not be used afterwards.
+        IXI_POOL views own nothing (refused)."""
+        assert self.store is None, "IXI_POOL: a bucket view owns no tensors"
         for t in [self.IQ4, self.K, self.MQ, self.MK, self.D, self.W, *self.outs, self.IQT, self.KT, self.INB, self.II, self.JJ,
                   self.CNT, self.OUT, self.NBK, self.EX]:  # fmt: skip
-            ttnn.deallocate(t)
+            if t is not None:
+                ttnn.deallocate(t)
         self._p = {}
-        self.ix1 = self.ix2 = None
+        self.ix1 = self.ix1f = self.ix2 = None
 
     def load(self, iq, K, nblk):
         """iq [n <= 128, 4, 128] bf16 (card rows), K [N, 128] bf16, nblk [128] ints (N_t per row; 0 = not scored)."""
@@ -760,18 +915,28 @@ class QsaIX3:
             [rd, cp, wr], cbs, [fp.semaphore_descriptor(0, cs, 0), fp.semaphore_descriptor(1, cs, 0)]
         )
 
-    def run(self):
-        self.ix1.run(self.IQ4, self.K, self.MQ, self.MK, self.D, self.W, self.outs)
+    def run(self, f=None):
+        """f (IXI_F: required): the key-page context of the fused IX1, a namespace with IPOOL, KC (None with PF_NOKC), PT, u, NCV (the
+        chunk's valid key columns, npad / 32), d (card role or None = ring), and with IXI_INC the layer's MK / KT state.
+        """
+        if self.ixf:
+            assert f is not None, "IXI_F: QsaIX3.run needs the key-page context"
+            MK = f.MK if self.inc else self.MK
+            self.ix1f.run(self.IQ4, self.MQ, f.IPOOL, f.KC, f.PT, MK, self.outs[2], self.outs[3], u=f.u, NC=self.npad // 32,
+                          NCV=f.NCV, d=f.d)  # fmt: skip
+        else:
+            self.ix1.run(self.IQ4, self.K, self.MQ, self.MK, self.D, self.W, self.outs)
+        KT = f.KT if self.inc else self.KT
         p1, t1 = self._sel(1)
         ttnn.generic_op(t1, p1)
         if self.dm and self.bs:  # QIX_BS: band-sized IX2
-            self.ix2.run_bs(self.JJ, self.IQT, self.KT, self.EX, self.CNT, self.sreg)
+            self.ix2.run_bs(self.JJ, self.IQT, KT, self.EX, self.CNT, self.sreg)
         elif self.dm:  # QIX_DM: dedicated IX2 data movement
-            self.ix2.run_dm(self.JJ, self.IQT, self.KT, self.EX, self.CNT)
+            self.ix2.run_dm(self.JJ, self.IQT, KT, self.EX, self.CNT)
         else:
             ii = ttnn.reshape(self.II, (1, 128 * CAP))
             jj = ttnn.reshape(self.JJ, (1, 128 * CAP))
-            self.ix2.run(ii, jj, self.IQT, self.KT, self.EX)
+            self.ix2.run(ii, jj, self.IQT, KT, self.EX)
         p2, t2 = self._sel(2, bool(self.dm and self.bs))
         ttnn.generic_op(t2, p2)
         return self.OUT

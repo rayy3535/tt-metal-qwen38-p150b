@@ -20,4 +20,7 @@ PROD_ENV = {
     "QSA_DEKEY": "1",
     "PF_PLE": "1",
     "PF_PARTIAL": "1",
+    "IXI_F": "1",  # common/ixi.py: fused IX1 program, one IX3 storage set, per-layer incremental key side
+    "IXI_POOL": "1",
+    "IXI_INC": "1",
 }

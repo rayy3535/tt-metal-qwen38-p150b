@@ -24,6 +24,7 @@ import torch
 
 import ttnn
 from models.demos.blackhole.qwen38_2x262k import ctx as ctxm
+from models.demos.blackhole.qwen38_2x262k.common import ixi as ixi_
 from models.demos.blackhole.qwen38_2x262k.prefill import gdn_d as pd
 from models.demos.blackhole.qwen38_2x262k.prefill import gr_tp, moe_r1
 from models.demos.blackhole.qwen38_2x262k.prefill import qsa_ring as QR
@@ -228,6 +229,7 @@ class PrefillChain:
                 lay.A = QR.QsaRing(mesh, W, grw, eps=cfg.rms_norm_eps, cap=cap, pt=self.pt, cos=cos, sin=sin, u=u,
                                    share={"r": self.sets["r"], "w": self.sets["w"], "rex": self.sets["rex"],
                                           "rout": self.RB}, state=dst)  # fmt: skip
+                lay.A.layer = i  # (IXI_CHECK's layer filter)
                 del W
             else:
                 full = Qwen38GDNWeights.from_checkpoint(ck, i)
@@ -244,6 +246,10 @@ class PrefillChain:
             mw.wrs = WriteRS(mesh, go.F, share=self.sets["w"], rout=self.RA)
             lay.M = mw
             self.L.append(lay)
+        if ixi_.pool() and any(
+            lay.kind == "Q" for lay in self.L
+        ):  # IXI_POOL: the IX3 storage set now (before any capture)
+            QR.ix3_pool(mesh).store_init(pfl=self.pt.table.shape[1] > 512)
         # PF_PLE=1: the device PLE (prefill/ple_pf.py); else the host PleHost
         from models.demos.blackhole.qwen38_2x262k.prefill.ple_pf import PF_PLE, PlePrefill
 
@@ -309,6 +315,7 @@ class PrefillChain:
         for a, b in zip(self.ck_live, self.ckb[u]):
             self.pcopy.run(b, a)
         self.pled.ctx = copy.deepcopy(self.ck_ctx[u])
+        self.ixi_reset()
 
     # ------------------------------------------------------------------ per prompt
     def reset(self):
@@ -329,6 +336,13 @@ class PrefillChain:
             self.ple.reset()
         if self.pled is not None:
             self.pled.reset()
+        self.ixi_reset()
+
+    def ixi_reset(self):
+        """IXI_INC: every QSA layer's watermark <- 0 (prompt begin: set_user, reset, restore; no-op without IXI_INC)."""
+        for lay in self.L:
+            if lay.kind == "Q":
+                lay.A.ixi_reset()
 
     def set_user(self, u: int):
         """The slot of the next prompt (QSA page-table row / ipool card / ring row)."""
@@ -337,6 +351,7 @@ class PrefillChain:
         for lay in self.L:
             if lay.kind == "Q":
                 lay.A.u = u
+        self.ixi_reset()
         if getattr(self, "mpf", None) is not None:  # MTP prefill rows (mtp/prefill.py)
             self.mpf.A.u = u
 
