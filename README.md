@@ -5,7 +5,7 @@
 - [Accuracy at a glance](#accuracy-at-a-glance)
 - [Performance at a glance](#performance-at-a-glance)
 - [What this repository is](#what-this-repository-is)
-- [Where the weights live and what is quantized](#where-the-weights-live-and-what-is-quantized)
+- [Weights and quantization](#weights-and-quantization)
 - [Approach: how this implementation was built, and why](#approach-how-this-implementation-was-built-and-why)
   - [The problem](#the-problem)
   - [Why not compose upstream ttnn ops](#why-not-compose-upstream-ttnn-ops)
@@ -100,57 +100,23 @@ Notes:
 Upstream tt-metal's own README is at
 [github.com/tenstorrent/tt-metal](https://github.com/tenstorrent/tt-metal/blob/main/README.md).
 
-## Where the weights live and what is quantized
+## Weights and quantization
 
-**All model weights are resident in the cards' DRAM**, loaded once at start-up. This includes every routed expert:
-none is paged in from host memory or evicted while serving. Only two embedding tables stay in host RAM. The host
-looks up rows in them and sends those rows as each step's input.
+All weights stay in the cards' DRAM, loaded once at start-up. Every routed expert is resident: none is paged in from
+host memory while serving. Only the token and n-gram embedding tables stay in host RAM.
 
-Formats:
-- **BF4 / BF8** are Tenstorrent's block-float formats `BFLOAT4_B` / `BFLOAT8_B`. Every 16 values share one 8-bit
-  exponent, and each value keeps a sign plus a 3-bit (BF4) or 7-bit (BF8) mantissa. These are the only quantized
-  formats used.
-- **BF16** is the checkpoint's own precision.
-- **Fidelity** is the matmul math fidelity of the decode programs (LoFi < HiFi2 < HiFi4). Matmuls accumulate in fp32.
+| component | format |
+|---|---|
+| routed experts (48 layers x 512 experts, top-10 per token) | BF4. Each card holds a quarter of every expert, about 17 GB per card |
+| shared expert | BF8 |
+| router | BF16; the top-10 selection runs on the device |
+| attention and linear-attention (GDN) projections, LM head | BF8 |
+| KV cache (2 x 262,144 tokens) | BF16, not quantized |
+| GDN recurrent state | fp32 |
 
-**Weights**
-
-| component | where | format | notes |
-|---|---|---|---|
-| routed experts (48 layers x 512, top-10 per token) | device DRAM, all resident | BF4 | Split over the 4 cards: each card holds a quarter of every expert (160 of 640 intermediate columns), spread evenly over its 8 DRAM banks. About 68 GB (63 GiB) in total, 17 GB (15.8 GiB) per card. Built once from the BF16 checkpoint by `tools/convert_tp4`. LoFi |
-| shared expert and its gate (every layer) | device DRAM | BF8 | a quarter per card; HiFi2 |
-| router | device DRAM | BF16 | HiFi4, fp32 logits; the top-10 selection runs on the device |
-| full-attention layers (12 of 48): q / gate, k, v and output projections, indexer projections | device DRAM | BF8 | projections, attention and indexer scoring at HiFi4 |
-| linear-attention (GDN) layers (36 of 48): input and output projections | device DRAM | BF8 | HiFi2 |
-| GDN convolution taps and gated-norm weight | device DRAM | BF16 | |
-| GDN decay and time-step bias | device DRAM | fp32 | |
-| hyper-connection weights (residual-branch mixing around every sublayer, and the final mixer) | device DRAM | BF8; norm weights BF16 | HiFi4 |
-| attention q / k norms and indexer norms | device DRAM | fp32 | |
-| n-gram embedding (PLE) projections | device DRAM | BF8 | HiFi4 |
-| LM head (vocabulary 248,320) | device DRAM | BF8 | split by vocabulary, 62,080 rows per card; HiFi4, fp32 logits; each card returns its top 20 per user |
-| MTP draft head (one layer) | device DRAM | as the backbone: attention BF8, experts BF4 (their own cache, about 1.4 GB), input fusion BF8 | shares the main LM head; fusion at HiFi4 |
-| token embedding (248,320 x 2,560) | host RAM | BF16 | 1.27 GB. MTP mode also keeps a vocabulary-split BF16 copy on the cards (318 MB per card) for the draft tokens |
-| n-gram embedding table (PLE) | host RAM | BF16 | 102.4 GB (95.4 GiB), read into RAM at start-up. Per step, the host gathers 16 rows per user |
-| vision encoder | not loaded | - | text only; requests with images are refused |
-
-The prefill runs its own programs. They read the same routed-expert tensors as decode, with no second copy. They keep
-their own copies of the other weights in prefill layouts; the attention, GDN and shared-expert projections are BF8
-there too. The fidelity notes above are for decode.
-
-**State and per-step data**
-
-| item | where | format | notes |
-|---|---|---|---|
-| KV cache (12 attention layers + the MTP layer) | device DRAM, allocated at start-up for 2 x 262,144 tokens | BF16 | not quantized. Paged in 64-token blocks; each card holds one KV head (two cards per head). About 0.54 GB per layer per card, about 7 GB per card in total |
-| indexer key pool | device DRAM | BF16 | one pooled key per 4 tokens, 128 wide |
-| GDN recurrent state | device DRAM | fp32 | the state update runs in fp32 |
-| GDN and PLE convolution history | device DRAM | BF16 | |
-| residual stream and activations | device L1 / DRAM | BF16 | 4 residual branches x 2,560. Intermediates stay in on-chip L1 inside a sublayer |
-| session snapshots for resumed turns | device DRAM | fp32 / BF16 | one per served slot, about 0.07 GB (69 MB) per card for both: the GDN recurrent state and convolution history. Saved and restored by copies on the device; the KV cache and the indexer key pool stay in place. The host keeps the prompt's token ids and the n-gram lookup context |
-| per-step input | host -> cards | BF16 | two writes from pinned host memory: the input residual built from the token embeddings (a 655 KB tile image), and about 20 KB of n-gram rows plus the users' positions. The prefill builds each chunk's input from the host embedding table too |
-| per-step output | cards -> host | fp32 values, int ids | each card's top 20 candidates per user. The host merges them and samples: greedy, or temperature / top-k / top-p |
-
-After start-up with MTP on, about 2.33 GB of DRAM is free per card.
+BF4 / BF8 are Tenstorrent's block-float formats `BFLOAT4_B` / `BFLOAT8_B`: every 16 values share one 8-bit exponent, and
+each value keeps a sign plus a 3-bit (BF4) or 7-bit (BF8) mantissa. Matmuls accumulate in fp32. The MTP draft head
+uses the same formats as the backbone. After start-up with MTP on, about 2.33 GB of DRAM is free per card.
 
 ## Approach: how this implementation was built, and why
 
