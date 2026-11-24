@@ -33,6 +33,7 @@ This package was written by AI coding agents (Anthropic's Claude, in Claude Code
 | `gr_rep/` | replicated-residual gated-residual read |
 | `tests/` | CPU-only tests (no device): QSA reference, server, MTP serving |
 | `tools/` | `convert_tp4.py` (routed-expert cache), `vendored.tsv` |
+| `docs/` | [`optimization.md`](docs/optimization.md): how the implementation was built and optimized |
 
 ## Standalone policy
 
