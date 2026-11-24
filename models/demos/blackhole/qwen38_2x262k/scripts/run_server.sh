@@ -39,9 +39,10 @@ export no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost
 
 # Serving mode: 2 slots x 262,144-token context, device prefill in the server, live MoE expert path.
 export QWEN38_CTX=262144 PF_SERVE=1 MOE_LIVE=1
-# MTP-mode switches (serve/mtp_serve.py turns all five on in MTP mode; an explicit 0 keeps one off).  The prefill
-# key-copy removal (PF_NOKC) stays off: it is not yet validated together with the other four.
-export PF_NOKC=0
+# MTP-mode switches (serve/mtp_serve.py turns all five on in MTP mode; an explicit 0 keeps one off).  PF_NOKC=1 (no
+# prefill key copy) is set explicitly, as in the measured deployment; with --mtp off start with PF_NOKC=0, because the
+# MTP-mode switches are refused outside MTP mode.
+export PF_NOKC=${PF_NOKC:-1}
 # Seconds to retry a busy port at start-up (a restarted server waits for the previous one to release it).
 export B4_SERVE_BIND_RETRY_S=120
 
@@ -61,7 +62,7 @@ export WORKER_L1=1300000
 # Device prefill configuration (the same values serve/server.py applies by default from prefill.PROD_ENV; exported here
 # so the environment is explicit).
 export QSA_RING=1 QIX_DM=1 QIX_BS=2 QIX_SFAST=1 QAS_QGB=1 QAS_MFOLD=1 QAS_PF=1 QAS_MF=1 QSA_QO=1 QIX_BUCKET=1024
-export QSA_DEKEY=1 PF_PLE=1 PF_PARTIAL=1
+export QSA_DEKEY=1 PF_PLE=1 PF_PARTIAL=1 IXI_F=1 IXI_POOL=1 IXI_INC=1
 
 ARGS=(--host 127.0.0.1 --port 8020 --checkpoint "$CHECKPOINT")
 [ -n "${QWEN38_REQUEST_LOG:-}" ] && ARGS+=(--ledger "$QWEN38_REQUEST_LOG")

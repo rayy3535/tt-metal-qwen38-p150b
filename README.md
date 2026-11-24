@@ -46,33 +46,49 @@ used, are in [Evaluation results](#evaluation-results-accuracy).
 
 ## Performance at a glance
 
-Measured on 4 x Blackhole p150b with an earlier code revision (outputs bitwise identical on the validation prompts;
-these tables were not re-measured, see [Caveats](#caveats)): long-context mode, MTP speculative decode on, greedy.
+Measured on 4 x Blackhole p150b: long-context mode, MTP speculative decode on, greedy. Unmarked values were measured
+on the production revision this code was taken from (same code; comments and messages differ). Values marked * are from
+an earlier revision and were not re-measured with the same method on this one (see the notes).
 
 | context | prefill, cold: time to first token | prefill throughput | decode, 1 user | decode, 2 users (aggregate) |
 |---|---|---|---|---|
-| 8K | 1.79 s | 4,410 tok/s | 285 tok/s | 340 tok/s |
-| 32K | 7.33 s | 4,240 tok/s | 258 tok/s | 333 tok/s |
-| 128K | 35.8 s | 3,520 tok/s | 297 tok/s | 312 tok/s |
-| 250K | 80.2 s | 3,070 tok/s | 214 tok/s | 255 tok/s |
+| 8K | 1.75 s | 4,530 tok/s | 285 tok/s * | 353 tok/s |
+| 32K | 7.10 s | 4,380 tok/s | 258 tok/s * | 346 tok/s |
+| 128K | 35.8 s * | 3,520 tok/s * | 297 tok/s * | 320 tok/s |
+| 250K | 67.4 s | 3,660 tok/s | 214 tok/s * | 272 tok/s |
 
 **Resumed agent turn.** A new turn of about 1K tokens on top of an existing session reuses the session's saved state
 instead of re-reading the whole prompt. Time to first token p50 is 1.3 s for a 12-30K session and 1.6 s for a 40-60K
 session (closed-loop agent replay, one session).
 
 Notes:
-- **Prefill throughput** = prompt tokens / time to first token, for a cold prompt (no reuse).
-- **Decode, 1 user:** 1,000 generated tokens, 2.9-3.9 tokens per MTP pass. The 128K value is server-side, because that
-  response is a tool call, which the server sends as one chunk.
+- **Prefill, cold:** client first token - submit, one run per point after a warm-up pass, prompts of 7,902 / 31,105 /
+  246,390 tokens. **Prefill throughput** = prompt tokens / time to first token, for a cold prompt (no reuse).
+- **128K prefill \*:** from the comparison below (126,094 tokens, n = 2, earlier revision). A cold 128K prompt was not
+  timed on this revision. A 131,150-token prompt that resumes from a saved 30,720-token prefix takes 26.7 s here (30.3 s
+  before the prefill indexer change below).
+- **Decode, 1 user \*:** from the comparison below (earlier revision): 1,000 generated tokens, 2.9-3.9 tokens per MTP
+  pass. The 128K value is server-side, because that response is a tool call, which the server sends as one chunk. The
+  conv-history layout change below was measured at server level only; there the one-user decode rate rose by 1.8-2.1 %
+  (8K / 32K / 128K).
 - **Decode, 2 users:** both users decoding at the same time.
-  - At 8K and 32K: the mean of 3 runs (ranges 339.5-340.0 and 333.0-333.9 tok/s).
-  - At 128K: two users at about 131K tokens each (308-317 tok/s, n = 2). Both resume from their saved prompt state and
-    then decode 1,000 tokens each together; aggregate = all generated tokens / (last end - first token). Measured
-    2026-11-23 on a later revision (the prefill indexer change), whose 2-user decode at 8K / 32K / 250K is within 3 % of
-    or above the other values in this column (332-343 / 335-336 / 266-268 tok/s).
-  - At 250K: two users at about 246K tokens each (252-257 tok/s).
-  - The 8K / 32K / 250K values come from the validation runs of that revision.
+  - At 8K and 32K: the server's step rate while both users decode (the sum of the two users' rates), one server run.
+  - At 128K: two users at about 131K tokens each (315-325 tok/s, n = 2). Both resume from their saved prompt state and
+    then decode 1,000 tokens each together; aggregate = all generated tokens / (last end - first token).
+  - At 250K: two users at about 246K tokens each, the same method as 128K (mean of 2 repeats in one server run).
 - The comparison with the upstream model and the method details are below.
+
+**Latest changes.** Each was measured on the cards against the revision before it, and each gave bitwise-identical
+server outputs on the validation prompts:
+- **Prefill indexer** (one fused program per card, one storage set for all key buckets, incremental key-side state per
+  layer): cold time to first token 8K 1.78 -> 1.75 s, 32K 7.52 -> 7.09 s, 250K 80.67 -> 67.25 s (2 + 2 alternating
+  runs); the 131K prompt resumed from a 30,720-token prefix 30.26 -> 26.68 s. It costs 0.32 GB of DRAM per card.
+- **GDN verify conv-history layout** (one 512 B page per user and tile column, read whole): 2-user decode step -0.31 ms
+  (-3.2 %, 4 alternating runs); aggregate 2-user decode +2.3 % to +3.1 % (8K, 32K and 250K documents and two request
+  sets; one server run per revision); time to first token unchanged (within 0.2 %).
+- **No prefill key copy** (`PF_NOKC=1`, now set by the launcher): the per-layer indexer key copies and their snapshot
+  copies are gone. DRAM free per card after start-up 1.71 -> 2.33 GB; session snapshots 0.47 -> 0.07 GB per card.
+- **Net:** DRAM free per card after start-up 2.03 GB (previous published revision) -> 2.33 GB.
 
 > All comparison numbers are final for the code revision they name. Measured 2026-11-21 on one machine, both servers
 > on the same tt-metal tree.
@@ -146,11 +162,11 @@ there too. The fidelity notes above are for decode.
 | GDN recurrent state | device DRAM | fp32 | the state update runs in fp32 |
 | GDN and PLE convolution history | device DRAM | BF16 | |
 | residual stream and activations | device L1 / DRAM | BF16 | 4 residual branches x 2,560. Intermediates stay in on-chip L1 inside a sublayer |
-| session snapshots for resumed turns | device DRAM | fp32 / BF16 | one per served slot, about 0.47 GB per card for both. Saved and restored by copies on the device; the KV cache stays in place. The host keeps the prompt's token ids and the n-gram lookup context |
+| session snapshots for resumed turns | device DRAM | fp32 / BF16 | one per served slot, about 0.07 GB (69 MB) per card for both: the GDN recurrent state and convolution history. Saved and restored by copies on the device; the KV cache and the indexer key pool stay in place. The host keeps the prompt's token ids and the n-gram lookup context |
 | per-step input | host -> cards | BF16 | two writes from pinned host memory: the input residual built from the token embeddings (a 655 KB tile image), and about 20 KB of n-gram rows plus the users' positions. The prefill builds each chunk's input from the host embedding table too |
 | per-step output | cards -> host | fp32 values, int ids | each card's top 20 candidates per user. The host merges them and samples: greedy, or temperature / top-k / top-p |
 
-After start-up with MTP on, about 2.03 GB of DRAM is free per card.
+After start-up with MTP on, about 2.33 GB of DRAM is free per card.
 
 ## Approach: how this implementation was built, and why
 
@@ -223,7 +239,7 @@ behind them. Decode was the hard part, so most of it is about decode.
      user for two users.
    - Measured: 2.9-3.9 tokens per pass for one user.
 7. **Result:** without MTP, a decode step costs 7.66 ms (8K), 7.78 ms (32K) and 8.49 ms (128K) for one user, and
-   8.3-9.1 ms for two users. With MTP, one user decodes at 214-297 tok/s and two users together at 255-340 tok/s
+   8.3-9.1 ms for two users. With MTP, one user decodes at 214-297 tok/s and two users together at 272-353 tok/s
    (tables above).
 
 ### How prefill and multi-turn were handled
@@ -357,16 +373,18 @@ prompt on every turn (12 of 12 turns). Ours resumes each session from its saved 
   MTP because FN's admission model refuses it at that size.
 - **Repeats.** n = 2-3 per point. Every "ours faster" verdict has non-overlapping ranges. The agent-load table is
   one run.
-- **Code revision.** Our numbers were measured on an earlier production revision: this code before its two latest
-  changes and before the clean-up for publication, plus the two moe_compute kernels.
-  - **The two latest changes** remove the 4 x 32K mode and unused prefill scratch tensors, and move host work around
-    the MTP verify state to the device. Both gave bitwise-identical server outputs on the validation prompts. The
-    latest one made decode steps 0.08-0.11 ms shorter and cold time to first token at 32K about 2-3 % slower than the
-    revision before it.
+- **Code revision.** Our comparison numbers were measured on an earlier production revision: this code before its
+  five latest changes and before the clean-up for publication, plus the two moe_compute kernels.
+  - **The five latest changes** remove the 4 x 32K mode and unused prefill scratch tensors; move host work around the
+    MTP verify state to the device; fuse the prefill indexer; change the GDN verify conv-history layout; and drop the
+    prefill key copy. Each gave bitwise-identical server outputs on the validation prompts. The MTP verify-state change
+    made decode steps 0.08-0.11 ms shorter and cold time to first token at 32K about 2-3 % slower than the revision
+    before it; the other three are summarised under [Performance at a glance](#performance-at-a-glance), whose
+    unmarked values include all five.
   - **The clean-up** edits comments, docstrings and log / help text only, apart from neutral default paths. It also
     removes development tests, probes and tools that the server does not import.
 
-  Nothing was re-measured on this exact commit.
+  Nothing in the comparison was re-measured on this exact commit.
 
 ## Evaluation results (accuracy)
 
@@ -504,7 +522,7 @@ models/demos/blackhole/qwen38_2x262k/scripts/run_server.sh --print-env     # sho
 - **Mesh descriptor:** the launcher's default `mgd/p150_4x1_ring_pinned.textproto` pins the mesh rows to the PCI bus
   numbers of the measured host. On another host, edit the pinning or set
   `TT_MESH_GRAPH_DESC_PATH=models/demos/blackhole/qwen38_2x262k/mgd/p150_4x1_ring.textproto`.
-- **Start-up DRAM:** after loading, the server logs the free DRAM per card in its `START` line: about 2.03 GB per card
+- **Start-up DRAM:** after loading, the server logs the free DRAM per card in its `START` line: about 2.33 GB per card
   with MTP on.
 - **Restarting after a hang:** on a device hang the server exits with code 124, and the cards then need
   `tt-smi -r` before the next start.
@@ -520,7 +538,9 @@ models/demos/blackhole/qwen38_2x262k/scripts/run_server.sh --print-env     # sho
 | `PF_SERVE` | env | device prefill inside the server; `0` feeds prompts through the decode path | `1` | `1` (default), `0` |
 | `MOE_LIVE` | env | the MoE router builds the expert union from live slots only (parked slots get no experts) | `1` | `1` (default), `0` |
 | `P1K_SEED`, `P1K_R16`, `MTP_V3W`, `P1K_DEVRESET` | env | MTP mode only: conv-history seed inside the device commit; verify ring rows without read-back; pre-built draft-input host tensors; device slot reset | unset (on in MTP mode) | unset or `1`: on in MTP mode; `0` turns one off; with MTP off only unset or `0` |
-| `PF_NOKC` | env | MTP mode only: no prefill key copy (every card writes the user's own index-pool pages) | `0` (launcher) | `0`; unset or `1` turns it on (the code's MTP-mode default), not yet validated together with the four items above; `1` needs `MTP3_IPALL=1`, which MTP mode sets |
+| `PF_NOKC` | env | MTP mode only: no prefill key copy (every card writes the user's own index-pool pages) | `1` (launcher) | `1` (also the code's MTP-mode default when unset), `0`; `1` needs `MTP3_IPALL=1`, which MTP mode sets. With `--mtp off` start with `PF_NOKC=0` |
+| `VF2_C8` | env | MTP mode only: layout of the GDN verify conv history | unset (`b` in MTP mode) | `b` (one 512 B page per user and tile column, read whole), `a` (same layout, 64 B record reads), `0` (one page per user and history slot); other values are refused |
+| `IXI_F`, `IXI_POOL`, `IXI_INC` | env | device prefill indexer: fused first-stage program; one storage set for all key buckets; incremental key-side state per layer | `1` (launcher, and the server's prefill profile) | `1`, `0`; `IXI_POOL` and `IXI_INC` need `IXI_F=1` |
 | `--mtp` | server flag | MTP speculative decode, decided at start-up | `auto` | `auto` (default: on with `PF_SERVE=1`, else off), `on`, `off` |
 | `--host` / `--port` | server flags | HTTP bind address | `127.0.0.1` / `8020` | any |
 | `--min-mem-gb` | server flag | refuse to serve if host MemAvailable after start-up is below this | `40` (default) | GB, float |
