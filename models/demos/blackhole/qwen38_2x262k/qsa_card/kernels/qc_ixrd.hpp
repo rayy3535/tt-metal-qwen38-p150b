@@ -34,6 +34,44 @@ FORCE_INLINE void copy32(uint32_t d, uint32_t s) {
 
 namespace ixk {
 #ifdef QA_VFY
+#ifdef VF3_F
+// VF3_F (1 = F1, 2 = F2): pass 0's staging moves before IX-rawwait, as plain stages before
+// its wait.  vf3_cs: cb_cs of pass k (the loop body's fill, unchanged).  vf3_keys: the block's raw keys with q < pf
+// (pre = true: the committed predecessors from the staging, own DRAM reads) or q >= pf (pre = false: this step's rows
+// at CB_QALL + 256 r, the projection cores' NoC writes - read only after the wait and its invalidate) into row 4 of CB
+// 8 set s (the loop body's copy, split by source; same destination bytes).  Out of line: one copy each for every pass.
+inline __attribute__((noinline)) void vf3_cs(uint32_t k, uint32_t npool, bool row_live, uint32_t misc) {
+    const uint32_t cs = get_write_ptr(cb_cs);
+    zero(cs, 4 * 512);
+    for (uint32_t j = 0; j < 4; ++j) {
+        for (uint32_t f = 0; f < 2; ++f) {
+            if (row_live) {
+                for (uint32_t r = 0; r < 4; ++r) {
+                    copy32(cs + j * 512 + f * 256 + 32 * r, misc + 256 + 64 * j + 32 * f);
+                }
+            }
+            if (k < npool) {
+                copy32(cs + j * 512 + f * 256 + 128, misc + 512 + 256 * k + 64 * j + 32 * f);
+            }
+        }
+    }
+}
+inline __attribute__((noinline)) void vf3_keys(
+    uint32_t a, uint32_t k, const VfyPool& p, const volatile uint32_t* w, uint32_t q0, bool pre) {
+    for (uint32_t s = 0; s < 4; ++s) {
+        const uint32_t q = 4 * p.J + s;
+        if ((q < p.pf) != pre) {
+            continue;
+        }
+        const uint32_t src = pre ? q0 + 1024 + 256 * (3 * k + s) : q0 + 256 * (vfy_row_at(w, p.u, q) & 3);
+        for (uint32_t t = 0; t < 4; ++t) {
+            for (uint32_t f = 0; f < 2; ++f) {
+                copy32(a + (4 * s + t) * 512 + f * 256 + 128, src + 64 * t + 32 * f);
+            }
+        }
+    }
+}
+#endif
 // MTP verify: the index core of card d on every card.  Row d's iq / rope(pos_d) as plain; per pooled block J of
 // user u (qc::vfy_pools, <= 2, row d's user first) one compute pass: rope(4 J) in row 4 of cb_cs and the block's 4 raw keys
 // as row 4 of CB_RING sets A..D (16 T8 tiles): positions < pf_u from the 8-slot ring t["ring8"] (DRAM, user u = page u,
@@ -97,6 +135,15 @@ FORCE_INLINE void ix_rd_main(uint32_t a0) {
         noc_async_read(gm.get_noc_addr(t), get_write_ptr(cb_gm) + t * 1024, 1024);
     }
     (void)zp;
+#if defined(VF3_F) && VF3_F == 2
+    // F2: CB 8 (16 T8 tiles = 8 KB) zeroed by 4 reads of the 2 KB DRAM zero page, landed by the barrier below
+    if (npool > 0) {
+        cb_reserve_back(8, 16);
+        for (uint32_t i = 0; i < 4; ++i) {
+            noc_async_read(zp.get_noc_addr(0), get_write_ptr(8) + 2048 * i, 2048);
+        }
+    }
+#endif
     cb_reserve_back(cb_ones, 1);
     for (uint32_t i = 0; i < 512; ++i) {
         w32(get_write_ptr(cb_ones))[i] = 0x3F803F80u;
@@ -119,6 +166,20 @@ FORCE_INLINE void ix_rd_main(uint32_t a0) {
     }
     noc_async_read_barrier();
     cb_push_back(cb_gm, 4);
+#ifdef VF3_F
+    // pass 0 before the wait: every source here is an own read landed by the barrier above (it invalidates the L1
+    // cache); no load of CB_QALL [0, 1024) before the wait.  CB 8 stays reserved, unpushed, until its keys are in.
+    cb_reserve_back(cb_cs, 4);
+    vf3_cs(0, npool, row_live, misc);
+    cb_push_back(cb_cs, 4);
+    if (npool > 0) {
+#if VF3_F != 2
+        cb_reserve_back(8, 16);
+        zero(get_write_ptr(8), 16 * 512);
+#endif
+        vf3_keys(get_write_ptr(8), 0, pools[0], w, q0, true);
+    }
+#endif
     {
         DeviceZoneScopedN("IX-rawwait");
         volatile tt_l1_ptr uint32_t* s = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_semaphore(SEM_IX));
@@ -129,6 +190,25 @@ FORCE_INLINE void ix_rd_main(uint32_t a0) {
     invalidate_l1_cache();  // (the raw keys landed by NoC writes)
     cb_reserve_back(CB_IXIN, 9);
     cb_push_back(CB_IXIN, 9);
+#ifdef VF3_F
+    if (npool > 0) {  // pass 0's in-step keys (q >= pf), then CB 8 to the compute
+        vf3_keys(get_write_ptr(8), 0, pools[0], w, q0, false);
+        cb_push_back(8, 16);
+    }
+    // pass 1 (2 pools) as before, through the same helpers: it runs behind pass 0's compute
+    for (uint32_t k = 1; k < npass; ++k) {
+        cb_reserve_back(cb_cs, 4);
+        vf3_cs(k, npool, row_live, misc);
+        cb_push_back(cb_cs, 4);
+        if (k < npool) {
+            cb_reserve_back(8, 16);
+            zero(get_write_ptr(8), 16 * 512);
+            vf3_keys(get_write_ptr(8), k, pools[k], w, q0, true);
+            vf3_keys(get_write_ptr(8), k, pools[k], w, q0, false);
+            cb_push_back(8, 16);
+        }
+    }
+#else
     for (uint32_t k = 0; k < npass; ++k) {
         cb_reserve_back(cb_cs, 4);
         const uint32_t cs = get_write_ptr(cb_cs);
@@ -168,6 +248,7 @@ FORCE_INLINE void ix_rd_main(uint32_t a0) {
             cb_push_back(8, 16);
         }
     }
+#endif
 }
 #else
 template <uint32_t CTO>

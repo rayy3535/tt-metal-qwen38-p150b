@@ -166,6 +166,32 @@ IQS_LAYOUT = lambda: (2048, 2304, 2368) if IQSC() else (4096, 6144, 8192)  # noq
 # core keeps every live row's raw key in the per-user 8-slot ring t["ring8"] and pools every user's in-step block)
 _VFY_FORCE = [False]
 VFY = lambda: _VFY_FORCE[0]  # noqa: E731
+# VF3_F (default off here; the server's MTP mode sets "1" through serve/mtp_serve.py MTP_ENV, an explicit value
+# wins): the verify build's index core stages pass 0 (cb_cs, CB 8's zero fill, the committed predecessor keys) before
+# IX-rawwait; only the in-step keys are copied after it (qc_ixrd.hpp VF3_F).  "1" = F1 (RISC zero fill), "2" = F2 (CB 8
+# zeroed by NoC reads of the DRAM zero page).  Unset / "0": no define, so every program's defines (and kernel hashes) are
+# unchanged (harnesses that do not apply MTP_ENV stay off unless they set VF3_F).  Any other value is refused.
+VF3_F_VALUES = ("0", "1", "2")
+_VF3_SAID = [False]
+
+
+def VF3_F():
+    v = os.environ.get("VF3_F", "0")
+    if v not in VF3_F_VALUES:
+        raise ValueError(f"VF3_F={v!r}: not one of {VF3_F_VALUES} (0 = off, 1 = F1, 2 = F2)")
+    return v
+
+
+def _vf3_defs():
+    v = VF3_F()  # (validated on every call, before the verify check)
+    if v == "0" or not VFY():
+        return []
+    if not _VF3_SAID[0]:
+        _VF3_SAID[0] = True
+        print(f"VF3_F ON: F{v} - QSA verify index core stages pass 0 before IX-rawwait", flush=True)
+    return [("VF3_F", v)]
+
+
 _IXM_FORCE = [None]  # qsa_layer ring variants: the variant being built (None = QC_IXM from the environment)
 IXM = lambda: ((_IXM_FORCE[0] if _IXM_FORCE[0] is not None else os.environ.get("QC_IXM", "")) if IX() else "")  # noqa
 
@@ -1032,7 +1058,7 @@ def build(mesh, card, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, rfloor
             u_rd,
             1,
             0,
-            udef,
+            udef + (_vf3_defs() if ixgrp_user else []),  # VF3_F: the reader only (default off: nothing added)
         ),
         fp.compute_kernel(
             K + "qc_ucp.cpp",
@@ -1143,7 +1169,7 @@ def build(mesh, card, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, rfloor
                     ],
                     1,
                     0,
-                    ixdefs,
+                    ixdefs + _vf3_defs(),  # VF3_F: the reader only (default off: nothing added)
                 ),
                 fp.compute_kernel(
                     K + "qc_ixcp.cpp",
