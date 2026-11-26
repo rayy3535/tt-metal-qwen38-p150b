@@ -39,6 +39,7 @@ On the official benchmarks run so far, accuracy reproduces the official model-ca
 | GPQA Diamond (3 runs x 198) | 91.6 % | 91.7 |
 | LiveCodeBench v6 (131 problems x 3) | 92.1 % | 91.9 |
 | SWE-bench Multilingual (300 tasks) | 80.0 % | 81.0 |
+| DeepSWE 1.1 (113 tasks) | 61.1 % | 58.7 |
 
 The other benchmarks on the official model card have **not been run yet**. Methods, and the code revisions these runs
 used, are in [Evaluation results](#evaluation-results-accuracy).
@@ -246,7 +247,8 @@ prompt on every turn (12 of 12 turns). Ours resumes each session from its saved 
 
 ## Evaluation results (accuracy)
 
-These runs used **earlier revisions of this code** and were **not re-run on this commit**.
+GPQA Diamond, LiveCodeBench and SWE-bench Multilingual used **earlier revisions of this code** and were **not re-run on
+this commit**. DeepSWE ran on this commit's code.
 
 - **MTP and greedy output.** MTP verification keeps greedy output bitwise identical to plain decode; the production
   gates measure this.
@@ -258,6 +260,7 @@ These runs used **earlier revisions of this code** and were **not re-run on this
 | GPQA Diamond, 3 seeds x 198 questions | 91.58 % mean (91.41 / 91.92 / 91.41 %; 181 / 182 / 181 correct), sd 0.29, pooled SE +/-1.14 | 91.7 |
 | LiveCodeBench v6, problems dated 2025-02-01 .. 2025-05-01, 131 problems x n = 3 = 393 samples | 92.11 % pass@1 | 91.9 |
 | SWE-bench Multilingual, 300 tasks | 80.0 % (240/300) | 81.0 |
+| DeepSWE 1.1, 113 tasks | 61.1 % (69/113), SE +/-4.6 | 58.7 (best of its Claude Code and mini-SWE-agent runs) |
 | GSM8K-64 (FN's `tools/benchmark.py`, greedy) | 89.1 % (57/64); FN 89.1 % on the same set | n/a |
 
 ### Method
@@ -276,6 +279,15 @@ These runs used **earlier revisions of this code** and were **not re-run on this
   - mini-swe-agent.
   - **As run: 222/300 = 74.0 %.** 24 submissions were missed because of a bug in the harness's submit detection.
   - **240/300:** with that bug fixed (the first submission of each trajectory) and the tasks re-graded.
+- **DeepSWE 1.1:**
+  - mini-swe-agent 2.4.6 with the configuration of the benchmark's own runner (Pier). The agent loop runs on the host and
+    every command runs in the task's container with networking disabled. The committed work is graded in a separate
+    verifier container, also without network.
+  - Chat Completions API (the benchmark's runner uses the Responses API); long-context mode (262K); the server's default
+    sampling; `reasoning_effort` xhigh; 2 tasks at a time.
+  - 12 of 113 tasks reached the 262K context limit and were graded on the work committed by then. One verifier timeout
+    counts as unresolved.
+  - The reference solutions pass 112 of 113 tasks in this setup; the score is still over 113.
 - **GSM8K-64:** run on the production revision of the comparison above.
 
 ## How to run
