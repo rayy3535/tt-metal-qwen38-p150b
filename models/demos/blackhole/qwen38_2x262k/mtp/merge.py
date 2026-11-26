@@ -47,6 +47,8 @@ dispatched or captured, so every program's static CBs are checked against them a
 
 from __future__ import annotations
 
+import os
+
 import ttnn
 from models.demos.blackhole.qwen38_2x262k import gdn_layer as gl
 from models.demos.blackhole.qwen38_2x262k.ccl.all_gather import AllGatherConfig
@@ -99,6 +101,33 @@ NREC = 8
 # gdn_layer CB_AG_PAD / CB_AG_G / CB_AG_T the arena; asserted by Scratch.cbs + the replica check in _build)
 CB_MG_G, CB_MG_T = 10, 11
 G_BYTES, T_BYTES = 5 * SL, 2 * SL  # gather: slice (SL) + output (4 x SL); transport: scratch (2 x SL)
+# MG_HOIST (default off here; the server's MTP mode sets "2" through serve/mtp_serve.py MTP_ENV, an explicit value
+# wins): unset / "0" = kernels/mg_nc.cpp with the same defines as before (byte-identical binary); "1" =
+# kernels/mg_nc2.cpp with the e_in row -> source map read once; "2" = that map + the selected rows copied by local NoC
+# L1 -> L1 reads.  Harnesses that do not apply MTP_ENV stay off unless
+# they set MG_HOIST.  Any other value is refused.
+MG_HOIST_VALUES = ("0", "1", "2")
+_MG_SAID = [False]
+
+
+def MG_HOIST():
+    v = os.environ.get("MG_HOIST", "0")
+    if v not in MG_HOIST_VALUES:
+        raise ValueError(
+            f"MG_HOIST={v!r}: not one of {MG_HOIST_VALUES} (0 = off, 1 = hoisted row map, 2 = hoisted map + NoC copy)"
+        )
+    return v
+
+
+def merge_kernel(sel):
+    """(kernel source, defines) of the gather core's merge kernel (MG_HOIST validated on every call)"""
+    v = MG_HOIST()
+    if v == "0":
+        return _K + "mg_nc.cpp", [("MG_SEL", "1")] if sel else None
+    if not _MG_SAID[0]:
+        _MG_SAID[0] = True
+        print(f"MG_HOIST ON: {v} - merge e_in copy (mtp/kernels/mg_nc2.cpp)", flush=True)
+    return _K + "mg_nc2.cpp", ([("MG_SEL", "1")] if sel else []) + [("MG_HOIST", v)]
 
 
 def _dm(src, cores, ct, rt, proc, nocid, named=(), defines=None):
@@ -167,14 +196,15 @@ class MergeDev:
         rows, cols = mesh.shape
         assert cols == 1 and rows == 4
         t_cc = cc(gl.TRANSPORT)
+        ksrc, kdefs = merge_kernel(sel)
         for d in range(rows):
             coord = ttnn.MeshCoordinate(d, 0)
             kg = _dm(
-                _K + "mg_nc.cpp", g_set,
+                ksrc, g_set,
                 acc(self.lmout) + acc(self.pin) + acc(self.emb) + acc(self.e_in) + acc(self.rec),
                 [(cc(gl.GATHER), [self.lmout.buffer_address(), self.pin.buffer_address(), self.emb.buffer_address(),
                                   self.e_in.buffer_address(), self.rec.buffer_address(), mode, slot, d])],
-                1, 1, self.ag.get_ncrisc_named_ct_args(coord), defines=[("MG_SEL", "1")] if sel else None,
+                1, 1, self.ag.get_ncrisc_named_ct_args(coord), defines=kdefs,
             )  # fmt: skip
             kg.common_runtime_args = self.ag.get_gather_ncrisc_common_rt_args(coord)
             t_named_b = [
