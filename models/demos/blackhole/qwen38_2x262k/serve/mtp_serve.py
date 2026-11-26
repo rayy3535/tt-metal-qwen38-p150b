@@ -49,10 +49,16 @@ MTP_ENV = {"MTP3": "1", "MTP3_VFY": "1", "MTP3_IPALL": "1", "MTP_DEVTOK": "1", "
            "VF3_F": "1",
            # mtp/merge.py MG_HOIST: the merge's e_in row copy with the row map hoisted + local NoC reads ("2").  An
            # explicit MG_HOIST in the environment wins (MTP_CHOICES: "0" = mg_nc.cpp, the base kernel; "1" = map only)
-           "MG_HOIST": "2"}  # fmt: skip
+           "MG_HOIST": "2",
+           # common/program.py L3_SEMMERGE: semaphore core sets merged into rectangles in every program this process
+           # builds (backbone decode, verify, MTP draft and device prefill; dispatch shape only, same binaries).
+           # qsa_layer L3_ONEGRP: the MTP head's QSA in one attention kernel group.  An explicit 0 in the environment
+           # wins for either (MTP_CHOICES).  --mtp off does not apply them
+           "L3_SEMMERGE": "1", "L3_ONEGRP": "1"}  # fmt: skip
 P1K_SWITCHES = ("P1K_SEED", "P1K_R16", "MTP_V3W", "P1K_DEVRESET", "PF_NOKC")
 # MTP-mode switches with more than two values: an explicit allowed value wins
-MTP_CHOICES = {"VF2_C8": ("0", "a", "b"), "VF3_F": ("0", "1", "2"), "MG_HOIST": ("0", "1", "2")}
+MTP_CHOICES = {"VF2_C8": ("0", "a", "b"), "VF3_F": ("0", "1", "2"), "MG_HOIST": ("0", "1", "2"),
+               "L3_SEMMERGE": ("0", "1"), "L3_ONEGRP": ("0", "1")}  # fmt: skip
 VLOG_KEEP = 1 << 16  # driver.vlog / v_tdraft rows kept (trimmed to this when twice as long)
 DRAM_S = float(os.environ.get("SV_MTP_DRAM_S", "60"))
 PROBE_EVERY = 100  # (dram_probe) prefill sublayers between samples
@@ -84,7 +90,7 @@ def preflight(mtp: str, env, pf_serve: bool):
         elif k in MTP_CHOICES and env.get(k) is not None:
             if env[k] not in MTP_CHOICES[k]:
                 return f"--mtp on: {k}={env[k]} (takes {' / '.join(MTP_CHOICES[k])})", {}
-            out[k] = env[k]  # explicit wins (VF2_C8=0 / VF3_F=0 / MG_HOIST=0: the base form)
+            out[k] = env[k]  # explicit wins (VF2_C8 / VF3_F / MG_HOIST / L3_* = 0: the base form)
         elif env.get(k) not in (None, v):
             return f"--mtp on needs {k}={v}; the environment has {k}={env.get(k)}", {}
     if out["PF_NOKC"] == "1" and out["MTP3_IPALL"] != "1":

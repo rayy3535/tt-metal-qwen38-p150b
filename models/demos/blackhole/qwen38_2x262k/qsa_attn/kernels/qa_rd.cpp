@@ -53,6 +53,9 @@
 #include "api/debug/kernel_profiler.hpp"
 #include "qa_common.hpp"
 #include "qa_dm.hpp"
+#ifdef L3_ONEGRP
+#include "l3_onegrp.hpp"
+#endif
 #ifdef QA_L1IN
 #include "models/demos/blackhole/qwen38_2x262k/qsa_card/kernels/qc_proj.hpp"
 #endif
@@ -66,7 +69,8 @@
 #ifdef QC_IXRQ  // qsa_card QC_IXRQ: the queued projection reads, served from inside the index phase's waits
 #define IX_RD_POLL() ::qc::rq_poll()
 #define IX_RD_HOOK() ::qc::rq_own_begin()
-#if defined(QC_IXRQX) || defined(QC_IXRQP)  // pages after x (QC_IXRQX: own weights from the start, behind the
+#if defined(QC_IXRQX) || defined(QC_IXRQP) || \
+    defined(L3_ONEGRP)  // pages after x (QC_IXRQX: own weights from the start, behind the
 // index region; QC_IXRQP: own weights after the pages)
 #define IX_RD_XGATE() ::qc::rq_xwait()
 #endif
@@ -218,6 +222,9 @@ FORCE_INLINE void q_gate(uint32_t gx, uint32_t gy, uint32_t core, uint32_t n) {
 }  // namespace
 
 void kernel_main() {
+#ifdef L3_ONEGRP
+    l3_g = get_arg_val<uint32_t>(L3_GA);
+#endif
 #ifdef QC_IXSZ
     if (get_arg_val<uint32_t>(QC_IXS_RA) == 0xC0FFEEu) {  // (measurement) never taken
         ixk::ix_rd_phase<QC_IXS_RCT>(QC_IXS_RA + 1);
@@ -306,6 +313,11 @@ void kernel_main() {
                 get_arg_val<uint32_t>(pa + QC_IX_RA + 3));
 #ifdef QC_IXRQX
         qc::rq_own_begin();  // QC_IXRQX: the own blocks right behind the index region (the pages wait for x)
+#endif
+#ifdef L3_ONEGRP
+        if (!l3_g) {
+            qc::rq_own_begin();  // (L3_ONEGRP) the q / k / v cores' QC_IXRQX; the gate-only cores' QC_IXRQP: after x
+        }
 #endif
 #else
         qc::proj_read(get_arg_val<uint32_t>(pa), b, get_arg_val<uint32_t>(pa + 1), get_arg_val<uint32_t>(pa + 2));

@@ -6,6 +6,9 @@
 // its weights nt x 80 BF8 tiles of W^T in [k][n] order contiguous in its own bank b (MOE_WLOCAL rule; qsa_probe
 // placement: bank worker + 7 nearest cores, 415-427 GB/s measured).
 #pragma once
+#ifdef L3_ONEGRP
+#include "models/demos/blackhole/qwen38_2x262k/qsa_attn/kernels/l3_onegrp.hpp"
+#endif
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
 #include "api/debug/kernel_profiler.hpp"
@@ -720,6 +723,9 @@ FORCE_INLINE void proj_dispatch(uint32_t a, const uint32_t* pos, const DBG& dbg)
         }
     }
 #ifndef QC_NORAW  // (qsa_card QC_IXSPLITQ: the gate-only cores, which send nothing to the user cores)
+#ifdef L3_ONEGRP  // (L3_ONEGRP: the same, decided per core)
+    if (!l3_g)
+#endif
     for (uint32_t u = 0; u < 4; ++u) {
         noc_semaphore_inc(proj_at(A_U + 2 * u, get_semaphore(SEM_RAW)), 1);
 #ifdef QC_UH

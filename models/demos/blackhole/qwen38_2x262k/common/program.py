@@ -240,7 +240,28 @@ def compute_kernel(
     return _kernel(source, cores, compile_time_args, runtime_args, defines, config, named)
 
 
+def sem_merge() -> bool:
+    """L3_SEMMERGE (switch, on in MTP mode): semaphore core sets merged into rectangles before they reach tt-metal.
+
+    tt-metal keeps a semaphore's CoreRangeSet as given (program.cpp add_semaphore) and writes its initial value with
+    one multicast per range (dispatch.cpp SemphoreCommandGenerator); every distinct destination rectangle is its own
+    unlinked chain behind a full write barrier (cq_dispatch.cpp process_write_packed_large).  Sets built from 1 x 1
+    ranges (the usual ``_set(cores)``) therefore cost one barrier per core per program launch.  Merged, the same
+    cores get the same value at the same address: the dispatch shape changes, nothing on the cores does."""
+
+    return os.environ.get("L3_SEMMERGE", "0") == "1"
+
+
+_SEM_SAID = [False]
+
+
 def semaphore_descriptor(id: int, cores: ttnn.CoreRangeSet, initial: int = 0) -> ttnn.SemaphoreDescriptor:
+    if sem_merge():
+        if not _SEM_SAID[0]:
+            _SEM_SAID[0] = True
+            print("L3_SEMMERGE ON: semaphore core sets merged into rectangles", flush=True)
+        if len(cores.ranges()) > 1:
+            cores = ttnn.CoreRangeSet([]).merge(cores)
     return ttnn.SemaphoreDescriptor(id=id, core_ranges=cores, initial_value=initial)
 
 

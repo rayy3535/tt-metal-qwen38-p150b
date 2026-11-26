@@ -358,8 +358,10 @@ def build(mesh, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, dump=None, r
             rd_rt[j_] = (cc_, list(a_) + [0] * (m_ - len(a_)) + tw)
         kdef = kdef + [("QA_VFY_RA", str(m_))]
 
-    def _kernels(cs, rd_rt, wr_rt, cp_rt, xdef):
+    def _kernels(cs, rd_rt, wr_rt, cp_rt, xdef, ga=None):
         kdef_ = kdef + list(xdef)
+        # L3_ONEGRP (qsa_card): each kernel's own index of the per-core gate flag (kernels/l3_onegrp.hpp)
+        gd = (lambda i: [("L3_GA", str(ga[i]))]) if ga is not None else (lambda i: [])  # noqa: E731
         dn = {k_ for k_, _ in kdef_}
         if "QA_SPARSE" in dn and "QS_IDS" not in dn and not {"QC_IXM", "QC_IXKVW"} <= dn:
             # (qa_wr.cpp has the same check as an #error: the page-count handshake's clear-before-set order)
@@ -373,7 +375,8 @@ def build(mesh, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, dump=None, r
             rd_ct,
             rd_rt,
             defines=kdef_
-            + ([("QA_KVZ", "1")] if os.environ.get("QA_KVZ") == "1" else []),  # KV stream markers (profiling)
+            + ([("QA_KVZ", "1")] if os.environ.get("QA_KVZ") == "1" else [])  # KV stream markers (profiling)
+            + gd(0),
         )
         rd.config = ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0)
         if l1in is not None and l1in.get("crta"):  # QC_CRTA: shared dispatch tables -> common runtime args
@@ -390,7 +393,8 @@ def build(mesh, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, dump=None, r
             + ([("QA_DUMP", "1")] if dump is not None else [])
             + ([("QA_RZ", "1")] if os.environ.get("QA_RZ") == "1" else [])  # R exchange marker zones (profiling)
             + ([("QA_RMX", "1")] if os.environ.get("QA_RMX", "0") == "1" else [])  # R max slot-major, branch-free keys
-            + kdef_,
+            + kdef_
+            + gd(1),
         )
         wr.config = ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1)
         if l1in is not None and l1in.get("crta"):
@@ -414,7 +418,8 @@ def build(mesh, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, dump=None, r
                 if l1in is not None
                 else []
             )
-            + kdef_,
+            + kdef_
+            + gd(2),
             fidelity=fidelity,
             fp32_dest=True,
             dst_full_sync=True,
@@ -426,7 +431,18 @@ def build(mesh, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, dump=None, r
         return [rd, wr, cp]
 
     split = lq.get("split")  # qsa_card QC_IXSPLITQ: a second kernel group (cores + extra defines) on the same sources
-    if split:
+    if split and split.get("onegrp"):
+        # L3_ONEGRP (qsa_card): ONE kernel group on all 64 cores; the gate-only cores' path is a per-core runtime flag
+        # appended after each kernel's longest arg list (shorter lists zero-padded: the kernels read fixed indices)
+        off = set(split["cores"])
+
+        def _flag(rt):
+            m = max(len(a) for _, a in rt)
+            return [(c_, list(a) + [0] * (m - len(a)) + [int((c_.x, c_.y) in off)]) for c_, a in rt], m
+
+        (rd_f, ga_rd), (wr_f, ga_wr), (cp_f, ga_cp) = _flag(rd_rt), _flag(wr_rt), _flag(cp_rt)
+        ks = _kernels(cs, rd_f, wr_f, cp_f, split["onegrp_defines"], ga=(ga_rd, ga_wr, ga_cp))
+    elif split:
         off = set(split["cores"])
         on_l = [c for *_, c in cl if c not in off]
         off_l = [c for *_, c in cl if c in off]

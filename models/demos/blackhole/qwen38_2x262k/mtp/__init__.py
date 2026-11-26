@@ -173,6 +173,9 @@ class MtpHead:
         self.A = ql.QsaLayer(
             mesh, t, self.xm, self.gr_attn, sm.red, sm.scratch, next_gr_w=self.gr_mlp, rfloor=self.rfloor
         )
+        self.A.onegrp = ql.onegrp_on()  # L3_ONEGRP (MTP mode): one attention kernel group in the draft / verify QSA
+        if self.A.onegrp:
+            print("L3_ONEGRP ON: MTP QSA one attention kernel group", flush=True)  # print: every server log
         del W
         # ---- MoE (MTP experts; decode's router buffers)
         self.w = self._moe_weights()
@@ -639,7 +642,9 @@ class MtpHead:
     def v3_capture(self, variants, ks):
         from models.demos.blackhole.qwen38_2x262k.prefill import capture_guard as CG
 
-        assert self.fz is not None and self.mg is not None, "the verify-mode draft trace needs MTP_FUSE=own and MTP_DEVTOK=1"
+        assert (
+            self.fz is not None and self.mg is not None
+        ), "the verify-mode draft trace needs MTP_FUSE=own and MTP_DEVTOK=1"
         self.v3tids = {}
         for v in variants:
             for k in ks:

@@ -203,6 +203,16 @@ constexpr auto QA_FX = static_cast<MathFidelity>(QA_FIDX);
 #else
 #define QC_OFID_T MathFidelity::HiFi2
 #endif
+#ifdef L3_ONEGRP
+#include "l3_onegrp.hpp"
+#if defined(L3_GMID) && defined(QC_IXM)  // (L3_ONEGRP) QC_IXGMID's hook below, gate-only cores only
+void gm_own(bool restore);
+#define IX_CP_MID_HOOK() \
+    if (l3_g) {          \
+        gm_own(true);    \
+    }
+#endif
+#endif
 #if defined(QC_IXSFIRST) && defined(QC_IXGMID) && defined(QC_IXM)
 // QC_IXGMID (qsa_card QC_IXSPLITQ gate cores, ad variant): the own (gate) projection tiles computed inside the
 // indexer's compute phase after the scores, before the rank step - the FPU idles there while the writer runs the
@@ -213,7 +223,13 @@ void gm_own(bool restore);
 #if defined(QC_IXSZ) || defined(QC_IXM)  // the indexer phase (QC_IXSZ: size measurement, never run; QC_IXM: merged)
 #include "models/demos/blackhole/qwen38_2x262k/qsa_index/kernels/ix_cp.hpp"
 #endif
-#if defined(QC_IXSFIRST) && defined(QC_IXGMID) && defined(QC_IXM)
+#if defined(L3_ONEGRP) && defined(QC_IXM)
+// (L3_ONEGRP) the indexer's compute phase runs from two sites (before the own tiles on gate-only cores, after the
+// projection on the others): one out-of-line copy
+__attribute__((noinline)) void l3_ix_cp_phase() { ixk::ix_cp_phase(); }
+#endif
+#if (defined(QC_IXSFIRST) && defined(QC_IXGMID) && defined(QC_IXM)) || \
+    (defined(L3_ONEGRP) && defined(L3_GMID) && defined(QC_IXM))
 uint32_t g_gm_ob = 0, g_gm_nt0 = 0, g_gm_done = 0;
 // one out-of-line copy for both call sites (inside the phase, and after it on dense steps): program size
 __attribute__((noinline)) void gm_own(bool restore) {
@@ -1077,6 +1093,9 @@ QA_SPNI void sparse_flow(uint32_t nch, bool vp) {
 #endif
 
 void kernel_main() {
+#ifdef L3_ONEGRP
+    l3_g = get_arg_val<uint32_t>(L3_GA);
+#endif
 #ifdef QC_IXSZ
     if (get_arg_val<uint32_t>(QC_IXS_CA) == 0xC0FFEEu) {  // (measurement) never taken
         ixk::ix_cp_phase();
@@ -1184,10 +1203,41 @@ void kernel_main() {
 #endif
         }
 #endif
+#if defined(L3_ONEGRP) && defined(QC_IXM)
+        if (l3_g) {  // (L3_ONEGRP) the QC_IXSFIRST block above, gate-only cores only
+            tile_regs_commit();
+            tile_regs_wait();
+            tile_regs_release();
+            QZONE("IXM-cp");
+            UNPACK((llk_unpack_hw_configure<DST_ACCUM_MODE>(ix::CB_PK, ix::CB_IQ)));
+            MATH((llk_math_hw_configure<DST_ACCUM_MODE>(ix::CB_PK, ix::CB_IQ)));
+            PACK((llk_pack_hw_configure<DST_ACCUM_MODE>(ix::CB_SC)));
+            PACK((llk_pack_init<PackMode::Default>(ix::CB_SC)));
+#ifdef L3_GMID
+            g_gm_ob = g_ob;
+            g_gm_nt0 = nt0;
+            g_gm_done = 0;
+#endif
+            l3_ix_cp_phase();
+#ifdef L3_GMID
+            gm_own(false);
+#else
+            qs::hw_conf(qc::CB_PW, qc::CB_PX, qc::CB_PO);
+            reconfig_data_format(qc::CB_PW, qc::CB_PX);
+            pack_reconfig_data_format(qc::CB_PO);
+            matmul_init(qc::CB_PX, qc::CB_PW);
+            MATH((llk_math_matmul_init<QC_PFID_T, 0>(qc::CB_PX, qc::CB_PW, 0)));
+            tile_regs_acquire();
+#endif
+        }
+#endif
 #if !(defined(QC_IXSFIRST) && defined(QC_IXGMID) && defined(QC_IXM))  // (QC_IXGMID: gm_own computed / pushed them)
         const uint32_t nt_own = nt0;
-        for (uint32_t k0 = 0; k0 < qc::K_TILES; k0 += qc::K_BLK) {
-            cb_wait_front(qc::CB_PW, g_ob + (k0 + qc::K_BLK) * nt0);
+#if defined(L3_ONEGRP) && defined(L3_GMID) && defined(QC_IXM)
+        if (!l3_g)
+#endif
+            for (uint32_t k0 = 0; k0 < qc::K_TILES; k0 += qc::K_BLK) {
+                cb_wait_front(qc::CB_PW, g_ob + (k0 + qc::K_BLK) * nt0);
 #ifdef QC_PU1  // (program size) the projection K loops not unrolled: one unpack / matmul call per tile
 #pragma GCC unroll 1
 #endif
@@ -1197,7 +1247,7 @@ void kernel_main() {
                     MATH((llk_math_matmul<QC_PFID_T, 0>(j)));
                 }
             }
-        }
+            }
 #endif
 #if defined(QC_IXSPLIT) && defined(QC_NX)
 #error "QC_IXSPLIT: not with QC_NX"
@@ -1205,14 +1255,20 @@ void kernel_main() {
 #if defined(QC_IXSPLIT) && !(defined(QC_IXSFIRST) && defined(QC_IXGMID) && defined(QC_IXM))
         // QC_IXSPLIT: the own tiles are packed and pushed before the index tiles run (their writer sends them, with
         // SEM_RAW, while the index tiles are computed)
-        tile_regs_commit();
-        cb_reserve_back(qc::CB_PO, nt_own);
-        tile_regs_wait();
-        for (uint32_t j = 0; j < nt_own; ++j) {
-            pack_tile(j, qc::CB_PO);
+#if defined(L3_ONEGRP) && defined(L3_GMID) && defined(QC_IXM)
+        if (!l3_g) {
+#endif
+            tile_regs_commit();
+            cb_reserve_back(qc::CB_PO, nt_own);
+            tile_regs_wait();
+            for (uint32_t j = 0; j < nt_own; ++j) {
+                pack_tile(j, qc::CB_PO);
+            }
+            tile_regs_release();
+            cb_push_back(qc::CB_PO, nt_own);
+#if defined(L3_ONEGRP) && defined(L3_GMID) && defined(QC_IXM)
         }
-        tile_regs_release();
-        cb_push_back(qc::CB_PO, nt_own);
+#endif
 #endif
 #ifdef QC_IXFIRST
         if (false) {  // the index tiles ran first
@@ -1307,6 +1363,9 @@ void kernel_main() {
 #endif
 #if defined(QC_IXM) && \
     !defined(QC_IXSFIRST)  // qsa_card QC_IXM (merged indexer): the indexer's compute phase after the projection
+#ifdef L3_ONEGRP
+        if (!l3_g)
+#endif
         {
             QZONE("IXM-cp");
             // full 32 x 32 geometry / formats for the indexer's operands (the projection ran tiny [4, 32] tiles)
@@ -1314,7 +1373,11 @@ void kernel_main() {
             MATH((llk_math_hw_configure<DST_ACCUM_MODE>(ix::CB_PK, ix::CB_IQ)));
             PACK((llk_pack_hw_configure<DST_ACCUM_MODE>(ix::CB_SC)));
             PACK((llk_pack_init<PackMode::Default>(ix::CB_SC)));
+#ifdef L3_ONEGRP
+            l3_ix_cp_phase();
+#else
             ixk::ix_cp_phase();
+#endif
         }
 #endif
 #ifdef QC_NX

@@ -168,7 +168,15 @@ def variant_for(max_len):
     return "dense" if max_len <= 2051 else ("c4" if max_len <= 4099 else "ad")
 
 
-def program_parts(mesh, card, t, gr, *, dbg=None, rfloor=float("-inf"), zones=False):
+def onegrp_on():
+    """L3_ONEGRP (MTP mode): the MTP head's QSA builds use ONE attention kernel group (qsa_card onegrp_defines,
+    kernels/l3_onegrp.hpp) instead of QC_IXSPLITQ's two; backbone layers are unchanged (QsaLayer.onegrp stays False)."""
+    v = os.environ.get("L3_ONEGRP", "0")
+    assert v in ("0", "1"), f"L3_ONEGRP={v} (0 or 1)"
+    return v == "1"
+
+
+def program_parts(mesh, card, t, gr, *, dbg=None, rfloor=float("-inf"), zones=False, onegrp=False):
     """One card's program descriptor.  t: qsa_card device tensors (kv, pt, pos, mir, out, wp, wo, rope, gamma, zero,
     pout); gr: SimpleNamespace(reducers, transport, gather, outs, red, xs, norm, w_down, w_up, pages, prime, next_norm,
     next_wd, ag1_in, ag1_out, ag2_in, ag3_in, ag3_out, defines)."""
@@ -245,6 +253,8 @@ def program_parts(mesh, card, t, gr, *, dbg=None, rfloor=float("-inf"), zones=Fa
         up=list(up),
         metric=place(),
     )
+    if onegrp:
+        ring["onegrp"] = True
     if qc.IXM() and getattr(gr, "ids", False):  # B4_AG_IDS: scoring cores -> the gather core's ids input slot
         ring["ids"] = [*g1, gr.ids_in]  # B4_AG_IDS_OWN: the ids gather's own input slot (else AG1's)
         # MTP verify: a verify build with the ring ids gather and without QC_IXKVW must carry the QA_IDSORD ordering
@@ -450,6 +460,7 @@ class QsaLayer:
         self.primed = False
         self._mpd = {}
         self.descs = []
+        self.onegrp = False  # L3_ONEGRP: set by the MTP head only (mtp/__init__.py)
 
     def _build(self, prime, variant=None, vfy=False):
         """variant: dense | c4 | ad | adr (None = QC_IXM from the environment); vfy: the MTP verify family."""
@@ -508,7 +519,9 @@ class QsaLayer:
                 + [("MO_PRE_GATE", os.environ.get("QS_GNEXT_R0", "2") if gnext() else "3")]
                 + ([("QS_GNEXT", "1")] if gnext() else []),
             )
-            p = program_parts(self.mesh, d, self.t, gr, dbg=self.dbg, rfloor=self.rfloor, zones=self.zones)
+            p = program_parts(
+                self.mesh, d, self.t, gr, dbg=self.dbg, rfloor=self.rfloor, zones=self.zones, onegrp=self.onegrp
+            )
             g_cc, t_cc = ttnn.CoreCoord(*gl.GATHER), ttnn.CoreCoord(*gl.TRANSPORT)
             g_set, t_set = _set([gl.GATHER]), _set([gl.TRANSPORT])
             # AG3 input: 80 o_proj tiles (SEM 14 += 1 per tile)

@@ -54,6 +54,17 @@
 #include "qa_dm.hpp"
 #include "models/demos/blackhole/qwen38_2x262k/kernels/common/end_barrier.hpp"
 #ifdef QA_L1IN
+#ifdef L3_ONEGRP  // (L3_ONEGRP, l3_onegrp.hpp) the QC_IXSFIRST hook below, taken on the gate-only cores only (l3_g)
+#include "l3_onegrp.hpp"
+void ixm_wr_block();
+#define QC_PROJ_MID_HOOK() \
+    if (l3_g) {            \
+        ixm_wr_block();    \
+    }
+#ifdef QS_IDS
+uint32_t ixm_ids_sent = 0;
+#endif
+#endif
 #ifdef QC_IXSFIRST  // score before the own tiles: the writer's index phase between the dispatch passes
 void ixm_wr_block();
 #define QC_PROJ_MID_HOOK() ixm_wr_block()
@@ -215,7 +226,9 @@ void ixm_ids_send() {
             nz += m16[k] != 0 ? 1 : 0;
         }
         ++ixm_dbg_n;
-#if defined(QC_IXSFIRST) && defined(QC_IXSEARLY)
+#if defined(L3_ONEGRP)
+        d32[0] = ixm_dbg_n | (l3_g ? (ixm_ids_sent << 8) : (0xFu << 8));
+#elif defined(QC_IXSFIRST) && defined(QC_IXSEARLY)
         d32[0] = ixm_dbg_n | (ixm_ids_sent << 8);
 #else
         d32[0] = ixm_dbg_n | (0xFu << 8);
@@ -277,7 +290,13 @@ void ixm_wr_block() {
     // this core's masks leave (the gather needs every core's masks, so the new flag cannot arrive earlier)
     *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(IX_CB_IXS) + 240) = 0;
 #endif
-#if defined(QC_IXSFIRST) && defined(QC_IXSEARLY) && defined(QS_IDS)
+#if defined(L3_ONEGRP) && defined(QS_IDS)
+    bool ids_now = false;  // (L3_ONEGRP: the QC_IXSEARLY test below, gate-only cores only)
+    if (l3_g) {
+        cb_wait_front(IX_CB_TAB, 1);
+        ids_now = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_read_ptr(IX_CB_TAB) + IX_TAB_DISP)[18] != 0;
+    }
+#elif defined(QC_IXSFIRST) && defined(QC_IXSEARLY) && defined(QS_IDS)
     // QC_IXSEARLY: the ring ids gather send right after the ids when this card's user is sparse.  The scoring cores
     // write their masks straight into the gather core's AG1 input slot (qsa_layer ring["ids"] = AG1's ag1_in), which is
     // free only once AG1 / X_MCAST are done, i.e. once x landed on this card.  A sparse card scored from iq^ (x
@@ -295,6 +314,29 @@ void ixm_wr_block() {
     // pushed the CB_TAB that ix_wr_phase consumed: the reader may poll the flag from now on (qa_rd.cpp QS_IDS)
     *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(IX_CB_IQS) + IX_IQS_FLAG + 32) = 1;
 #endif
+#ifdef L3_ONEGRP  // the two-group tails below, chosen per core (gate-only: QC_IXSFIRST + QC_IXSEARLY; others: neither)
+#ifdef QS_IDS
+    if (l3_g) {
+        ixm_ids_sent = ids_now ? 1 : 0;
+        if (ids_now) {
+#if defined(L3_SKVE) && defined(QC_IXKVW)
+            *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(IX_CB_IQS) + IX_IQS_FLAG + 32) = 1;
+#endif
+            ixm_ids_send();
+        }
+    }
+#endif
+#ifdef QC_IXKVW
+    if (!l3_g) {
+        *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(IX_CB_IQS) + IX_IQS_FLAG + 32) = 1;
+    }
+#endif
+#ifdef QS_IDS
+    if (!l3_g) {
+        ixm_ids_send();
+    }
+#endif
+#else
 #if defined(QC_IXSFIRST) && defined(QC_IXSEARLY) && defined(QS_IDS)
     ixm_ids_sent = ids_now ? 1 : 0;
     if (ids_now) {
@@ -312,10 +354,14 @@ void ixm_wr_block() {
 #if defined(QS_IDS) && !defined(QC_IXSFIRST)
     ixm_ids_send();
 #endif
+#endif
 }
 #endif
 
 void kernel_main() {
+#ifdef L3_ONEGRP
+    l3_g = get_arg_val<uint32_t>(L3_GA);
+#endif
 #if defined(QS_IDS) && defined(QC_IXSDBG)
     ixm_dbg_n = 0;
 #endif
@@ -413,7 +459,10 @@ void kernel_main() {
     }
 #if defined(QC_IXM) && \
     !defined(QC_IXSFIRST)  // qsa_card QC_IXM: the indexer's writer phase after the projection dispatch
-    ixm_wr_block();
+#ifdef L3_ONEGRP
+    if (!l3_g)
+#endif
+        ixm_wr_block();
 #endif
 #if defined(QC_IXSFIRST) && defined(QC_IXKVW)
     // QC_IXSFIRST: the KV-stream release after the own tiles went out too
@@ -429,6 +478,16 @@ void kernel_main() {
 #else
     ixm_ids_send();
 #endif
+#endif
+#if defined(L3_ONEGRP) && defined(QC_IXKVW)  // (L3_ONEGRP) the two QC_IXSFIRST blocks above, gate-only cores only
+    if (l3_g) {
+        *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(IX_CB_IQS) + IX_IQS_FLAG + 32) = 1;
+    }
+#endif
+#if defined(L3_ONEGRP) && defined(QS_IDS)
+    if (l3_g && !ixm_ids_sent) {
+        ixm_ids_send();
+    }
 #endif
     // o_proj output args (after the dispatch args: 65 + 203): no, first N tile, partial addr
 #ifdef QC_CRTA  // dispatch tables in the common args: per-core 65..67 dispatch, 68..70 o_proj

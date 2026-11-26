@@ -295,6 +295,26 @@ IXRQ = lambda: os.environ.get("QC_IXRQ", "0") == "1" and IXKVA() and os.environ.
 IDSORD = lambda: os.environ.get("QA_IDSORD", "1") == "1" and not IXKVW()  # noqa: E731
 
 
+def onegrp_defines(sdefs, odefs):
+    """L3_ONEGRP: the defines of the one attention kernel group = the two groups' common ones + L3_ONEGRP (+ L3_SKVE /
+    L3_GMID when the gate-only group has QC_IXSKVE / QC_IXGMID).  The kernels implement exactly the default two-group
+    sets (qa_rd / qa_wr / qa_cp / qc_proj.hpp L3_ONEGRP blocks); any other set is refused."""
+    sn, on = [k for k, _ in sdefs], [k for k, _ in odefs]
+    common = [d for d in odefs if d in sdefs]
+    assert on == ["QC_IXRQ", "IX_RDTRID", "QC_IXRQX"] and [k for k, _ in common] == ["QC_IXRQ", "IX_RDTRID"], (
+        on,
+        common,
+    )
+    req = {"QC_IXRQ", "IX_RDTRID", "QC_IXRQP", "QC_IXSFIRST", "QC_NORAW", "QC_IXSEARLY"}
+    assert req <= set(sn) <= req | {"QC_IXSKVE", "QC_IXGMID"}, sn
+    return (
+        common
+        + [("L3_ONEGRP", "1")]
+        + ([("L3_SKVE", "1")] if "QC_IXSKVE" in sn else [])
+        + ([("L3_GMID", "1")] if "QC_IXGMID" in sn else [])
+    )
+
+
 def gate_only_cores(rl):
     """Attention core indices (8 b + k) whose own projection tiles are all gate tiles (the QC_IXSPLITQ second group)."""
     own = lambda i: range(rl.tiles[i][1], rl.tiles[i][1] + (2 if i % 8 < 6 else 1))  # noqa: E731
@@ -827,6 +847,8 @@ def build(mesh, card, t, *, fidelity=ttnn.MathFidelity.HiFi2, zones=True, rfloor
         assert on in ("", "none", "rqx"), on
         odefs = [("QC_IXRQ", "1"), ("IX_RDTRID", "13"), ("QC_IXRQX", "1")] if on == "rqx" else []
         l1in["split"] = dict(cores=[rl.att[i][3] for i in gate_only], defines=sdefs, on_defines=odefs)
+        if ring.get("onegrp"):  # L3_ONEGRP (qsa_layer QsaLayer.onegrp; the MTP head only): one kernel group
+            l1in["split"].update(onegrp=True, onegrp_defines=onegrp_defines(sdefs, odefs))
     l1in["place_card"] = pc
     if pup is not None:
         l1in["place_up"] = pup
